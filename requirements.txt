@@ -1,0 +1,14 @@
+# Python dependencies for tools and scripts
+
+# Build tools
+pyserial>=3.5
+esptool>=4.0
+
+# Development
+pytest>=7.0
+black>=22.0
+flake8>=5.0
+
+# Utilities
+requests>=2.28.0
+pyyaml>=6.0
