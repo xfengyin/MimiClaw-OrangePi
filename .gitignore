@@ -1,0 +1,47 @@
+# Build directory
+build/
+cmake-build-*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled files
+*.o
+*.a
+*.so
+*.exe
+mimiclaw
+
+# Packages
+*.deb
+*.tar.gz
+*.zip
+
+# Testing
+testing/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (local)
+config/config.json
+config/mimi_secrets.h
+
+# Data
+data/
+memory.db
+*.db
+
+# Temporary
+tmp/
+temp/
+*.tmp

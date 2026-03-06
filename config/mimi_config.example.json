@@ -1,0 +1,80 @@
+{
+  "system": {
+    "name": "MimiClaw-OrangePi",
+    "version": "1.0.0",
+    "log_level": "info",
+    "data_directory": "/var/lib/mimiclaw"
+  },
+  "network": {
+    "wifi": {
+      "enabled": true,
+      "ssid": "your_wifi_ssid",
+      "password": "your_wifi_password",
+      "country": "CN"
+    },
+    "ethernet": {
+      "enabled": true,
+      "dhcp": true
+    }
+  },
+  "telegram": {
+    "enabled": true,
+    "bot_token": "your_telegram_bot_token",
+    "allowed_users": [],
+    "webhook_url": ""
+  },
+  "anthropic": {
+    "api_key": "your_anthropic_api_key",
+    "model": "claude-sonnet-4-5-20250929",
+    "max_tokens": 4096,
+    "temperature": 0.7
+  },
+  "proxy": {
+    "enabled": false,
+    "type": "http",
+    "host": "127.0.0.1",
+    "port": 7890,
+    "username": "",
+    "password": ""
+  },
+  "memory": {
+    "storage_type": "sqlite",
+    "database_path": "/var/lib/mimiclaw/memory.db",
+    "max_sessions": 100,
+    "session_timeout": 3600,
+    "auto_save": true
+  },
+  "gateway": {
+    "websocket": {
+      "enabled": true,
+      "port": 18789,
+      "max_connections": 10
+    },
+    "http": {
+      "enabled": true,
+      "port": 8080,
+      "auth_required": true
+    }
+  },
+  "tools": {
+    "web_search": {
+      "enabled": false,
+      "provider": "brave",
+      "api_key": ""
+    },
+    "file_access": {
+      "enabled": true,
+      "allowed_paths": [
+        "/home/orangepi",
+        "/tmp"
+      ],
+      "max_file_size": 1048576
+    }
+  },
+  "personality": {
+    "name": "Mimi",
+    "language": "zh-CN",
+    "tone": "friendly",
+    "system_prompt": "你是一个运行在 OrangePi Zero3 上的 AI 助手。你乐于助人、友好、知识渊博。"
+  }
+}

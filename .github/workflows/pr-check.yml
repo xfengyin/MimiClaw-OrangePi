@@ -1,0 +1,94 @@
+name: PR Check
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    types: [ opened, synchronize, reopened ]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Check commit message format
+      run: |
+        # Check conventional commits format
+        commits=$(git log --format=%s origin/${{ github.base_ref }}..HEAD)
+        echo "Commits to check:"
+        echo "$commits"
+        
+        # Allow any commit message for now, just warn
+        echo "$commits" | while read line; do
+          if [[ ! $line =~ ^(feat|fix|docs|style|refactor|test|chore|ci|build)(\(.+\))?:\ .+ ]]; then
+            echo "⚠️ Warning: Commit message does not follow conventional commits format: $line"
+          fi
+        done
+        
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          gcc-arm-linux-gnueabihf \
+          g++-arm-linux-gnueabihf \
+          libcurl4-openssl-dev \
+          libjson-c-dev \
+          libsqlite3-dev \
+          libssl-dev
+          
+    - name: Configure and Build
+      run: |
+        mkdir -p build
+        cd build
+        cmake .. \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_SYSTEM_NAME=Linux \
+          -DCMAKE_SYSTEM_PROCESSOR=arm \
+          -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc \
+          -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++
+        make -j$(nproc)
+        
+    - name: Comment PR
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          
+          const botComment = comments.find(comment => 
+            comment.user.type === 'Bot' && 
+            comment.body.includes('## Build Status')
+          );
+          
+          const body = `## Build Status ✅
+          
+          - Build: **Success**
+          - Target: OrangePi Zero3 (ARM)
+          - Compiler: arm-linux-gnueabihf-gcc
+          
+          Ready for review!`;
+          
+          if (botComment) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: body
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+          }
