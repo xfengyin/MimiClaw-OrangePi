@@ -48,37 +48,29 @@ set(CORE_SOURCES
     src/core/main.c
     src/core/config.c
     src/core/logger.c
-    src/core/utils.c
 )
 
 set(AGENT_SOURCES
     src/agent/agent_loop.c
-    src/agent/context_builder.c
-    src/agent/llm_client.c
 )
 
 set(MEMORY_SOURCES
     src/memory/memory_store.c
-    src/memory/session_manager.c
-    src/memory/file_storage.c
 )
 
 set(GATEWAY_SOURCES
     src/gateway/websocket_server.c
-    src/gateway/http_server.c
     src/gateway/telegram_bot.c
 )
 
 set(CLI_SOURCES
-    src/cli/command_parser.c
-    src/cli/interactive_shell.c
 )
 
 set(TOOLS_SOURCES
     src/tools/tool_registry.c
-    src/tools/web_search.c
-    src/tools/time_tool.c
-    src/tools/file_tool.c
+    src/tools/tool_web_search.c
+    src/tools/tool_get_time.c
+    src/tools/tool_files.c
 )
 
 # All sources
