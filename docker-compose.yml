@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  mimiclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mimiclaw-orangepi
+    restart: unless-stopped
+    
+    # Environment variables
+    environment:
+      - MIMICLAW_LOG_LEVEL=info
+      - MIMICLAW_MASTER_KEY=${MIMICLAW_MASTER_KEY:-default_key_change_in_production}
+    
+    # Mount configuration
+    volumes:
+      - ./config:/etc/mimiclaw:ro
+      - mimiclaw-data:/var/lib/mimiclaw
+      - mimiclaw-logs:/var/log/mimiclaw
+    
+    # Network ports
+    ports:
+      - "8080:8080"      # HTTP API / Health check
+      - "18789:18789"    # WebSocket
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mimiclaw-data:
+    driver: local
+  mimiclaw-logs:
+    driver: local

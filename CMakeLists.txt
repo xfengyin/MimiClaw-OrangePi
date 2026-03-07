@@ -48,6 +48,10 @@ set(CORE_SOURCES
     src/core/main.c
     src/core/config.c
     src/core/logger.c
+    src/core/connection_pool.c
+    src/core/cache.c
+    src/core/crypto.c
+    src/core/metrics.c
 )
 
 set(AGENT_SOURCES
@@ -61,6 +65,7 @@ set(MEMORY_SOURCES
 set(GATEWAY_SOURCES
     src/gateway/websocket_server.c
     src/gateway/telegram_bot.c
+    src/gateway/http_server.c
 )
 
 set(CLI_SOURCES
