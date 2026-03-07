@@ -45,12 +45,7 @@ jobs:
       run: |
         mkdir -p build
         cd build
-        cmake .. \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_SYSTEM_NAME=Linux \
-          -DCMAKE_SYSTEM_PROCESSOR=arm \
-          -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc \
-          -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++
+        cmake .. -DCMAKE_BUILD_TYPE=Release
           
     - name: Build
       run: |
