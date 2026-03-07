@@ -119,16 +119,30 @@ install(TARGETS mimiclaw
     RUNTIME DESTINATION bin
 )
 
-install(DIRECTORY config/
-    DESTINATION /etc/mimiclaw
-    FILES_MATCHING PATTERN "*.json" PATTERN "*.conf"
-)
-
-install(DIRECTORY scripts/
-    DESTINATION /usr/share/mimiclaw
-    FILES_MATCHING PATTERN "*.sh" PATTERN "*.py"
-    PERMISSIONS OWNER_EXECUTE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
-)
+# Use relative paths for packaging, absolute paths for local install
+if(CPACK_GENERATOR)
+    # When building packages, use relative paths
+    install(DIRECTORY config/
+        DESTINATION etc/mimiclaw
+        FILES_MATCHING PATTERN "*.json" PATTERN "*.conf"
+    )
+    install(DIRECTORY scripts/
+        DESTINATION usr/share/mimiclaw
+        FILES_MATCHING PATTERN "*.sh" PATTERN "*.py"
+        PERMISSIONS OWNER_EXECUTE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
+    )
+else()
+    # For local install, use absolute paths (requires sudo)
+    install(DIRECTORY config/
+        DESTINATION /etc/mimiclaw
+        FILES_MATCHING PATTERN "*.json" PATTERN "*.conf"
+    )
+    install(DIRECTORY scripts/
+        DESTINATION /usr/share/mimiclaw
+        FILES_MATCHING PATTERN "*.sh" PATTERN "*.py"
+        PERMISSIONS OWNER_EXECUTE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
+    )
+endif()
 
 # CPack configuration
 set(CPACK_PACKAGE_NAME "mimiclaw-orangepi")
