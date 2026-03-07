@@ -107,7 +107,7 @@ void logger_log(log_level_t level, const char *file, int line, const char *fmt, 
     
     // Print to console with colors
     if (g_logger.fp == stdout) {
-        fprintf(stdout, "%s[%s] %s%-5s\033[0m \033[90m%s:%d\033[0m ", 
+        fprintf(stdout, "%s [%s%-5s\033[0m] \033[90m%s:%d\033[0m ", 
             time_buf, 
             level_colors[level],
             level_strings[level],

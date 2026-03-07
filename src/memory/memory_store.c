@@ -251,9 +251,9 @@ int session_get_history(memory_store_t *store, const char *session_id,
     (*history)[0] = '\0';
     
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        strcat(*history, sqlite3_column_text(stmt, 0));
+        strcat(*history, (const char*)sqlite3_column_text(stmt, 0));
         strcat(*history, ": ");
-        strcat(*history, sqlite3_column_text(stmt, 1));
+        strcat(*history, (const char*)sqlite3_column_text(stmt, 1));
         strcat(*history, "\n");
     }
     

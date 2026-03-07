@@ -117,7 +117,8 @@ int config_load(const char *path, app_config_t *config) {
         return -1;
     }
     
-    fread(buffer, 1, size, fp);
+    size_t read_size = fread(buffer, 1, size, fp);
+    (void)read_size; // Suppress warning
     buffer[size] = '\0';
     fclose(fp);
     
