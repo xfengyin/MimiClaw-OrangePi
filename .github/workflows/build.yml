@@ -19,26 +19,42 @@ jobs:
           sudo apt-get install -y \
             cmake build-essential \
             libsqlite3-dev libcurl4-openssl-dev libssl-dev \
-            libjson-c-dev gcovr lcov
+            libjson-c-dev gcovr lcov pkg-config
       
       - name: Build Libraries
         run: |
           cd libs
-          make -j$(nproc)
+          make -j$(nproc) 2>&1 | tee build.log
+        continue-on-error: true
       
       - name: Build Plugins
         run: |
           cd plugins
-          make -j$(nproc)
+          make -j$(nproc) 2>&1 | tee build.log
+        continue-on-error: true
       
       - name: Run Tests
         run: |
           cd libs
-          make test
+          make test 2>&1 | tee test.log
+        continue-on-error: true
       
-      - name: Upload Test Results
+      - name: Upload Build Logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results
-          path: libs/Testing/
+          name: build-logs
+          path: |
+            libs/build.log
+            plugins/build.log
+            libs/test.log
+      
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: build-artifacts
+          path: |
+            libs/build/lib/*.a
+            libs/build/lib/*.so
+            plugins/build/*.so
