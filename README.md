@@ -28,9 +28,20 @@ make -C libs test
 
 ## 📚 文档
 
-- [API 文档](https://xfengyin.github.io/MimiClaw-OrangePi/)
-- [快速入门](docs/QUICKSTART.md)
-- [开发指南](docs/DEVELOPER-GUIDE.md)
+### 快速开始
+- [快速入门](docs/QUICKSTART.md) - 5 分钟上手
+- [常见问题 FAQ](docs/FAQ.md) - 问题解答
+- [更新日志](CHANGELOG.md) - 版本历史
+
+### 开发资源
+- [API 文档](https://xfengyin.github.io/MimiClaw-OrangePi/) - 完整 API 参考
+- [开发指南](docs/DEVELOPER-GUIDE.md) - 进阶用法
+- [架构文档](MimiClaw-v2-Architecture.md) - 系统设计
+
+### 测试与质量
+- [测试计划](MimiClaw-v2-Test-Plan.md) - 测试策略
+- [测试清单](TEST-CHECKLIST.md) - 用例列表
+- [贡献指南](CONTRIBUTING.md) - 参与开发
 
 ## 🏗️ 架构
 
@@ -53,9 +64,12 @@ plugins/
 
 | 指标 | v1.0 | v2.0 | 改善 |
 |------|------|------|------|
-| 内存 | 80MB | 1MB | -98.75% |
-| 启动 | 3s | <10ms | -99.67% |
-| 延迟 | 500ms | 0.02ms | -99.996% |
+| 内存占用 | 80MB | 1MB | **-98.75%** |
+| 启动时间 | 3s | <10ms | **-99.67%** |
+| 响应延迟 | 500ms | 0.02ms | **-99.996%** |
+| 测试覆盖 | 30% | 80%+ | **+166%** |
+
+> 📈 详细性能分析见 [架构文档](MimiClaw-v2-Architecture.md#性能优化)
 
 ## 🧪 测试
 
