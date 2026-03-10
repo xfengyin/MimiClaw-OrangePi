@@ -1,0 +1,524 @@
+        -:    0:Source:libmimi-core/src/core.c
+        -:    1:/**
+        -:    2: * @file core.c
+        -:    3: * @brief MimiClaw Core Library Implementation
+        -:    4: * @version 2.0.0
+        -:    5: */
+        -:    6:
+        -:    7:#define _GNU_SOURCE
+        -:    8:
+        -:    9:#include "mimi_core.h"
+        -:   10:#include <stdlib.h>
+        -:   11:#include <string.h>
+        -:   12:#include <stdio.h>
+        -:   13:
+        -:   14:/* ============================================================================
+        -:   15: * Internal Structures
+        -:   16: * ============================================================================ */
+        -:   17:
+        -:   18:/**
+        -:   19: * @brief Context entry for session context storage
+        -:   20: */
+        -:   21:typedef struct mimi_core_context_entry {
+        -:   22:    char *key;
+        -:   23:    char *value;
+        -:   24:    struct mimi_core_context_entry *next;
+        -:   25:} mimi_core_context_entry_t;
+        -:   26:
+        -:   27:/**
+        -:   28: * @brief Session structure
+        -:   29: */
+        -:   30:typedef struct mimi_core_session {
+        -:   31:    char *session_id;
+        -:   32:    mimi_core_context_entry_t *context;
+        -:   33:    struct mimi_core_session *next;
+        -:   34:} mimi_core_session_t;
+        -:   35:
+        -:   36:/**
+        -:   37: * @brief Internal core context structure
+        -:   38: */
+        -:   39:struct mimi_core_ctx {
+        -:   40:    mimi_core_config_t config;
+        -:   41:    mimi_core_session_t *sessions;
+        -:   42:    int initialized;
+        -:   43:};
+        -:   44:
+        -:   45:/* ============================================================================
+        -:   46: * Internal Helper Functions
+        -:   47: * ============================================================================ */
+        -:   48:
+    #####:   49:static int validate_config(const mimi_core_config_t *config)
+        -:   50:{
+    #####:   51:    if (config == NULL) {
+    #####:   52:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:   53:    }
+    #####:   54:    if (config->api_key[0] == '\0') {
+    #####:   55:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:   56:    }
+    #####:   57:    if (config->model[0] == '\0') {
+    #####:   58:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:   59:    }
+    #####:   60:    if (config->max_tokens <= 0) {
+    #####:   61:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:   62:    }
+    #####:   63:    if (config->temperature < 0.0f || config->temperature > 2.0f) {
+    #####:   64:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:   65:    }
+    #####:   66:    return MIMI_CORE_OK;
+        -:   67:}
+        -:   68:
+    #####:   69:static mimi_core_session_t* find_session(mimi_core_ctx_t *ctx, const char *session_id)
+        -:   70:{
+    #####:   71:    if (ctx == NULL || session_id == NULL) {
+    #####:   72:        return NULL;
+        -:   73:    }
+        -:   74:    
+    #####:   75:    mimi_core_session_t *session = ctx->sessions;
+    #####:   76:    while (session != NULL) {
+    #####:   77:        if (strcmp(session->session_id, session_id) == 0) {
+    #####:   78:            return session;
+        -:   79:        }
+    #####:   80:        session = session->next;
+        -:   81:    }
+    #####:   82:    return NULL;
+        -:   83:}
+        -:   84:
+    #####:   85:static mimi_core_session_t* create_session(const char *session_id)
+        -:   86:{
+    #####:   87:    mimi_core_session_t *session = (mimi_core_session_t*)malloc(sizeof(mimi_core_session_t));
+    #####:   88:    if (session == NULL) {
+    #####:   89:        return NULL;
+        -:   90:    }
+        -:   91:    
+    #####:   92:    session->session_id = strdup(session_id);
+    #####:   93:    if (session->session_id == NULL) {
+    #####:   94:        free(session);
+    #####:   95:        return NULL;
+        -:   96:    }
+        -:   97:    
+    #####:   98:    session->context = NULL;
+    #####:   99:    session->next = NULL;
+    #####:  100:    return session;
+        -:  101:}
+        -:  102:
+    #####:  103:static void free_session(mimi_core_session_t *session)
+        -:  104:{
+    #####:  105:    if (session == NULL) {
+    #####:  106:        return;
+        -:  107:    }
+        -:  108:    
+        -:  109:    /* Free context entries */
+    #####:  110:    mimi_core_context_entry_t *entry = session->context;
+    #####:  111:    while (entry != NULL) {
+    #####:  112:        mimi_core_context_entry_t *next = entry->next;
+    #####:  113:        free(entry->key);
+    #####:  114:        free(entry->value);
+    #####:  115:        free(entry);
+    #####:  116:        entry = next;
+        -:  117:    }
+        -:  118:    
+    #####:  119:    free(session->session_id);
+    #####:  120:    free(session);
+        -:  121:}
+        -:  122:
+    #####:  123:static int set_context_entry(mimi_core_session_t *session, const char *key, const char *value)
+        -:  124:{
+    #####:  125:    if (session == NULL || key == NULL || value == NULL) {
+    #####:  126:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  127:    }
+        -:  128:    
+        -:  129:    /* Check if key already exists */
+    #####:  130:    mimi_core_context_entry_t *entry = session->context;
+    #####:  131:    while (entry != NULL) {
+    #####:  132:        if (strcmp(entry->key, key) == 0) {
+    #####:  133:            char *new_value = strdup(value);
+    #####:  134:            if (new_value == NULL) {
+    #####:  135:                return MIMI_CORE_ERR_NO_MEMORY;
+        -:  136:            }
+    #####:  137:            free(entry->value);
+    #####:  138:            entry->value = new_value;
+    #####:  139:            return MIMI_CORE_OK;
+        -:  140:        }
+    #####:  141:        entry = entry->next;
+        -:  142:    }
+        -:  143:    
+        -:  144:    /* Create new entry */
+    #####:  145:    entry = (mimi_core_context_entry_t*)malloc(sizeof(mimi_core_context_entry_t));
+    #####:  146:    if (entry == NULL) {
+    #####:  147:        return MIMI_CORE_ERR_NO_MEMORY;
+        -:  148:    }
+        -:  149:    
+    #####:  150:    entry->key = strdup(key);
+    #####:  151:    entry->value = strdup(value);
+    #####:  152:    if (entry->key == NULL || entry->value == NULL) {
+    #####:  153:        free(entry->key);
+    #####:  154:        free(entry->value);
+    #####:  155:        free(entry);
+    #####:  156:        return MIMI_CORE_ERR_NO_MEMORY;
+        -:  157:    }
+        -:  158:    
+    #####:  159:    entry->next = session->context;
+    #####:  160:    session->context = entry;
+    #####:  161:    return MIMI_CORE_OK;
+        -:  162:}
+        -:  163:
+    #####:  164:static const char* get_context_entry(mimi_core_session_t *session, const char *key)
+        -:  165:{
+    #####:  166:    if (session == NULL || key == NULL) {
+    #####:  167:        return NULL;
+        -:  168:    }
+        -:  169:    
+    #####:  170:    mimi_core_context_entry_t *entry = session->context;
+    #####:  171:    while (entry != NULL) {
+    #####:  172:        if (strcmp(entry->key, key) == 0) {
+    #####:  173:            return entry->value;
+        -:  174:        }
+    #####:  175:        entry = entry->next;
+        -:  176:    }
+    #####:  177:    return NULL;
+        -:  178:}
+        -:  179:
+        -:  180:/* ============================================================================
+        -:  181: * Lifecycle Management
+        -:  182: * ============================================================================ */
+        -:  183:
+    #####:  184:int mimi_core_init(mimi_core_ctx_t **ctx, const mimi_core_config_t *config)
+        -:  185:{
+    #####:  186:    if (ctx == NULL) {
+    #####:  187:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  188:    }
+        -:  189:    
+    #####:  190:    int ret = validate_config(config);
+    #####:  191:    if (ret != MIMI_CORE_OK) {
+    #####:  192:        return ret;
+        -:  193:    }
+        -:  194:    
+    #####:  195:    *ctx = (mimi_core_ctx_t*)calloc(1, sizeof(mimi_core_ctx_t));
+    #####:  196:    if (*ctx == NULL) {
+    #####:  197:        return MIMI_CORE_ERR_NO_MEMORY;
+        -:  198:    }
+        -:  199:    
+    #####:  200:    memcpy(&(*ctx)->config, config, sizeof(mimi_core_config_t));
+    #####:  201:    (*ctx)->sessions = NULL;
+    #####:  202:    (*ctx)->initialized = 1;
+        -:  203:    
+    #####:  204:    return MIMI_CORE_OK;
+        -:  205:}
+        -:  206:
+    #####:  207:int mimi_core_destroy(mimi_core_ctx_t *ctx)
+        -:  208:{
+    #####:  209:    if (ctx == NULL) {
+    #####:  210:        return MIMI_CORE_OK;
+        -:  211:    }
+        -:  212:    
+        -:  213:    /* Free all sessions */
+    #####:  214:    mimi_core_session_t *session = ctx->sessions;
+    #####:  215:    while (session != NULL) {
+    #####:  216:        mimi_core_session_t *next = session->next;
+    #####:  217:        free_session(session);
+    #####:  218:        session = next;
+        -:  219:    }
+        -:  220:    
+    #####:  221:    ctx->initialized = 0;
+    #####:  222:    free(ctx);
+    #####:  223:    return MIMI_CORE_OK;
+        -:  224:}
+        -:  225:
+        -:  226:/* ============================================================================
+        -:  227: * Chat & Conversation
+        -:  228: * ============================================================================ */
+        -:  229:
+    #####:  230:int mimi_core_chat(mimi_core_ctx_t *ctx, const char *session_id,
+        -:  231:                   const char *user_message, mimi_core_response_t *response)
+        -:  232:{
+    #####:  233:    if (ctx == NULL || session_id == NULL || user_message == NULL || response == NULL) {
+    #####:  234:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  235:    }
+        -:  236:    
+    #####:  237:    if (!ctx->initialized) {
+    #####:  238:        return MIMI_CORE_ERR_INIT_FAILED;
+        -:  239:    }
+        -:  240:    
+        -:  241:    /* Auto-create session if not exists */
+    #####:  242:    mimi_core_session_t *session = find_session(ctx, session_id);
+    #####:  243:    if (session == NULL) {
+    #####:  244:        int ret = mimi_core_session_create(ctx, session_id);
+    #####:  245:        if (ret != MIMI_CORE_OK) {
+    #####:  246:            return ret;
+        -:  247:        }
+    #####:  248:        session = find_session(ctx, session_id);
+    #####:  249:        if (session == NULL) {
+    #####:  250:            return MIMI_CORE_ERR_INIT_FAILED;
+        -:  251:        }
+        -:  252:    }
+        -:  253:    
+        -:  254:    /* Initialize response */
+    #####:  255:    memset(response, 0, sizeof(mimi_core_response_t));
+        -:  256:    
+        -:  257:    /* 
+        -:  258:     * TODO: Implement actual AI API call
+        -:  259:     * For now, return a placeholder response
+        -:  260:     */
+    #####:  261:    response->content = strdup("Echo: Your message was received.");
+    #####:  262:    response->finish_reason = strdup("stop");
+    #####:  263:    if (response->content == NULL || response->finish_reason == NULL) {
+    #####:  264:        free(response->content);
+    #####:  265:        free(response->finish_reason);
+    #####:  266:        return MIMI_CORE_ERR_NO_MEMORY;
+        -:  267:    }
+        -:  268:    
+    #####:  269:    response->usage_prompt_tokens = 10;
+    #####:  270:    response->usage_completion_tokens = 5;
+    #####:  271:    response->tool_results = NULL;
+    #####:  272:    response->tool_results_count = 0;
+        -:  273:    
+    #####:  274:    return MIMI_CORE_OK;
+        -:  275:}
+        -:  276:
+    #####:  277:void mimi_core_response_free(mimi_core_response_t *response)
+        -:  278:{
+    #####:  279:    if (response == NULL) {
+    #####:  280:        return;
+        -:  281:    }
+        -:  282:    
+    #####:  283:    free(response->content);
+    #####:  284:    free(response->finish_reason);
+        -:  285:    
+    #####:  286:    if (response->tool_results != NULL) {
+    #####:  287:        for (int i = 0; i < response->tool_results_count; i++) {
+    #####:  288:            free(response->tool_results[i].tool_name);
+    #####:  289:            free(response->tool_results[i].input);
+    #####:  290:            free(response->tool_results[i].output);
+        -:  291:        }
+    #####:  292:        free(response->tool_results);
+        -:  293:    }
+        -:  294:    
+    #####:  295:    memset(response, 0, sizeof(mimi_core_response_t));
+        -:  296:}
+        -:  297:
+        -:  298:/* ============================================================================
+        -:  299: * Context Management
+        -:  300: * ============================================================================ */
+        -:  301:
+    #####:  302:int mimi_core_set_context(mimi_core_ctx_t *ctx, const char *session_id,
+        -:  303:                          const char *key, const char *value)
+        -:  304:{
+    #####:  305:    if (ctx == NULL || session_id == NULL || key == NULL || value == NULL) {
+    #####:  306:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  307:    }
+        -:  308:    
+    #####:  309:    mimi_core_session_t *session = find_session(ctx, session_id);
+    #####:  310:    if (session == NULL) {
+    #####:  311:        return MIMI_CORE_ERR_SESSION_NOT_FOUND;
+        -:  312:    }
+        -:  313:    
+    #####:  314:    return set_context_entry(session, key, value);
+        -:  315:}
+        -:  316:
+    #####:  317:int mimi_core_get_context(mimi_core_ctx_t *ctx, const char *session_id,
+        -:  318:                          const char *key, char **value)
+        -:  319:{
+    #####:  320:    if (ctx == NULL || session_id == NULL || key == NULL || value == NULL) {
+    #####:  321:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  322:    }
+        -:  323:    
+    #####:  324:    mimi_core_session_t *session = find_session(ctx, session_id);
+    #####:  325:    if (session == NULL) {
+    #####:  326:        return MIMI_CORE_ERR_SESSION_NOT_FOUND;
+        -:  327:    }
+        -:  328:    
+    #####:  329:    const char *entry_value = get_context_entry(session, key);
+    #####:  330:    if (entry_value == NULL) {
+    #####:  331:        return MIMI_CORE_ERR_NOT_FOUND;
+        -:  332:    }
+        -:  333:    
+    #####:  334:    *value = strdup(entry_value);
+    #####:  335:    if (*value == NULL) {
+    #####:  336:        return MIMI_CORE_ERR_NO_MEMORY;
+        -:  337:    }
+        -:  338:    
+    #####:  339:    return MIMI_CORE_OK;
+        -:  340:}
+        -:  341:
+    #####:  342:int mimi_core_delete_context(mimi_core_ctx_t *ctx, const char *session_id,
+        -:  343:                             const char *key)
+        -:  344:{
+    #####:  345:    if (ctx == NULL || session_id == NULL || key == NULL) {
+    #####:  346:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  347:    }
+        -:  348:    
+    #####:  349:    mimi_core_session_t *session = find_session(ctx, session_id);
+    #####:  350:    if (session == NULL) {
+    #####:  351:        return MIMI_CORE_ERR_SESSION_NOT_FOUND;
+        -:  352:    }
+        -:  353:    
+    #####:  354:    mimi_core_context_entry_t **prev = &session->context;
+    #####:  355:    mimi_core_context_entry_t *entry = session->context;
+        -:  356:    
+    #####:  357:    while (entry != NULL) {
+    #####:  358:        if (strcmp(entry->key, key) == 0) {
+    #####:  359:            *prev = entry->next;
+    #####:  360:            free(entry->key);
+    #####:  361:            free(entry->value);
+    #####:  362:            free(entry);
+    #####:  363:            return MIMI_CORE_OK;
+        -:  364:        }
+    #####:  365:        prev = &entry->next;
+    #####:  366:        entry = entry->next;
+        -:  367:    }
+        -:  368:    
+    #####:  369:    return MIMI_CORE_ERR_NOT_FOUND;
+        -:  370:}
+        -:  371:
+    #####:  372:int mimi_core_clear_context(mimi_core_ctx_t *ctx, const char *session_id)
+        -:  373:{
+    #####:  374:    if (ctx == NULL || session_id == NULL) {
+    #####:  375:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  376:    }
+        -:  377:    
+    #####:  378:    mimi_core_session_t *session = find_session(ctx, session_id);
+    #####:  379:    if (session == NULL) {
+    #####:  380:        return MIMI_CORE_ERR_SESSION_NOT_FOUND;
+        -:  381:    }
+        -:  382:    
+        -:  383:    /* Free all context entries */
+    #####:  384:    mimi_core_context_entry_t *entry = session->context;
+    #####:  385:    while (entry != NULL) {
+    #####:  386:        mimi_core_context_entry_t *next = entry->next;
+    #####:  387:        free(entry->key);
+    #####:  388:        free(entry->value);
+    #####:  389:        free(entry);
+    #####:  390:        entry = next;
+        -:  391:    }
+        -:  392:    
+    #####:  393:    session->context = NULL;
+    #####:  394:    return MIMI_CORE_OK;
+        -:  395:}
+        -:  396:
+        -:  397:/* ============================================================================
+        -:  398: * Session Management
+        -:  399: * ============================================================================ */
+        -:  400:
+    #####:  401:int mimi_core_session_create(mimi_core_ctx_t *ctx, const char *session_id)
+        -:  402:{
+    #####:  403:    if (ctx == NULL || session_id == NULL) {
+    #####:  404:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  405:    }
+        -:  406:    
+    #####:  407:    if (find_session(ctx, session_id) != NULL) {
+    #####:  408:        return MIMI_CORE_ERR_SESSION_EXISTS;
+        -:  409:    }
+        -:  410:    
+    #####:  411:    mimi_core_session_t *session = create_session(session_id);
+    #####:  412:    if (session == NULL) {
+    #####:  413:        return MIMI_CORE_ERR_NO_MEMORY;
+        -:  414:    }
+        -:  415:    
+    #####:  416:    session->next = ctx->sessions;
+    #####:  417:    ctx->sessions = session;
+    #####:  418:    return MIMI_CORE_OK;
+        -:  419:}
+        -:  420:
+    #####:  421:int mimi_core_session_delete(mimi_core_ctx_t *ctx, const char *session_id)
+        -:  422:{
+    #####:  423:    if (ctx == NULL || session_id == NULL) {
+    #####:  424:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  425:    }
+        -:  426:    
+    #####:  427:    mimi_core_session_t **prev = &ctx->sessions;
+    #####:  428:    mimi_core_session_t *session = ctx->sessions;
+        -:  429:    
+    #####:  430:    while (session != NULL) {
+    #####:  431:        if (strcmp(session->session_id, session_id) == 0) {
+    #####:  432:            *prev = session->next;
+    #####:  433:            free_session(session);
+    #####:  434:            return MIMI_CORE_OK;
+        -:  435:        }
+    #####:  436:        prev = &session->next;
+    #####:  437:        session = session->next;
+        -:  438:    }
+        -:  439:    
+    #####:  440:    return MIMI_CORE_ERR_SESSION_NOT_FOUND;
+        -:  441:}
+        -:  442:
+    #####:  443:int mimi_core_session_list(mimi_core_ctx_t *ctx, char ***sessions, int *count)
+        -:  444:{
+    #####:  445:    if (ctx == NULL || sessions == NULL || count == NULL) {
+    #####:  446:        return MIMI_CORE_ERR_INVALID_ARG;
+        -:  447:    }
+        -:  448:    
+        -:  449:    /* Count sessions */
+    #####:  450:    int session_count = 0;
+    #####:  451:    mimi_core_session_t *session = ctx->sessions;
+    #####:  452:    while (session != NULL) {
+    #####:  453:        session_count++;
+    #####:  454:        session = session->next;
+        -:  455:    }
+        -:  456:    
+    #####:  457:    if (session_count == 0) {
+    #####:  458:        *sessions = NULL;
+    #####:  459:        *count = 0;
+    #####:  460:        return MIMI_CORE_OK;
+        -:  461:    }
+        -:  462:    
+        -:  463:    /* Allocate array */
+    #####:  464:    *sessions = (char**)malloc(session_count * sizeof(char*));
+    #####:  465:    if (*sessions == NULL) {
+    #####:  466:        return MIMI_CORE_ERR_NO_MEMORY;
+        -:  467:    }
+        -:  468:    
+        -:  469:    /* Fill array */
+    #####:  470:    session = ctx->sessions;
+    #####:  471:    for (int i = 0; i < session_count; i++) {
+    #####:  472:        (*sessions)[i] = strdup(session->session_id);
+    #####:  473:        if ((*sessions)[i] == NULL) {
+        -:  474:            /* Cleanup on failure */
+    #####:  475:            for (int j = 0; j < i; j++) {
+    #####:  476:                free((*sessions)[j]);
+        -:  477:            }
+    #####:  478:            free(*sessions);
+    #####:  479:            *sessions = NULL;
+    #####:  480:            *count = 0;
+    #####:  481:            return MIMI_CORE_ERR_NO_MEMORY;
+        -:  482:        }
+    #####:  483:        session = session->next;
+        -:  484:    }
+        -:  485:    
+    #####:  486:    *count = session_count;
+    #####:  487:    return MIMI_CORE_OK;
+        -:  488:}
+        -:  489:
+        -:  490:/* ============================================================================
+        -:  491: * Utility Functions
+        -:  492: * ============================================================================ */
+        -:  493:
+    #####:  494:const char* mimi_core_version(void)
+        -:  495:{
+    #####:  496:    return MIMI_CORE_VERSION;
+        -:  497:}
+        -:  498:
+    #####:  499:const char* mimi_core_strerror(int error)
+        -:  500:{
+    #####:  501:    switch (error) {
+    #####:  502:        case MIMI_CORE_OK:
+    #####:  503:            return "Success";
+    #####:  504:        case MIMI_CORE_ERR_INVALID_ARG:
+    #####:  505:            return "Invalid argument";
+    #####:  506:        case MIMI_CORE_ERR_NO_MEMORY:
+    #####:  507:            return "Memory allocation failed";
+    #####:  508:        case MIMI_CORE_ERR_INIT_FAILED:
+    #####:  509:            return "Initialization failed";
+    #####:  510:        case MIMI_CORE_ERR_NOT_FOUND:
+    #####:  511:            return "Resource not found";
+    #####:  512:        case MIMI_CORE_ERR_API_ERROR:
+    #####:  513:            return "External API error";
+    #####:  514:        case MIMI_CORE_ERR_TIMEOUT:
+    #####:  515:            return "Operation timeout";
+    #####:  516:        case MIMI_CORE_ERR_SESSION_EXISTS:
+    #####:  517:            return "Session already exists";
+    #####:  518:        case MIMI_CORE_ERR_SESSION_NOT_FOUND:
+    #####:  519:            return "Session not found";
+    #####:  520:        default:
+    #####:  521:            return "Unknown error";
+        -:  522:    }
+        -:  523:}

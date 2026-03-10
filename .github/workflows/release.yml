@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake build-essential \
+            libsqlite3-dev libcurl4-openssl-dev libssl-dev
+      
+      - name: Build All
+        run: |
+          make -C libs
+          make -C plugins
+          make -C tests
+      
+      - name: Create Release Archive
+        run: |
+          tar -czvf mimiclaw-v${{ github.ref_name }}.tar.gz \
+            libs/build/ plugins/build/ docs/ scripts/
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: mimiclaw-v${{ github.ref_name }}.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

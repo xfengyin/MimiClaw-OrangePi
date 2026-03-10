@@ -1,0 +1,1065 @@
+        -:    0:Source:libmimi-memory/src/memory.c
+        -:    1:/**
+        -:    2: * @file memory.c
+        -:    3: * @brief MimiClaw Memory Library Implementation
+        -:    4: * @version 2.0.0
+        -:    5: */
+        -:    6:
+        -:    7:#define _GNU_SOURCE
+        -:    8:
+        -:    9:#include "mimi_memory.h"
+        -:   10:#include <stdlib.h>
+        -:   11:#include <string.h>
+        -:   12:#include <stdio.h>
+        -:   13:#include <sqlite3.h>
+        -:   14:#include <time.h>
+        -:   15:
+        -:   16:/* ============================================================================
+        -:   17: * Internal Structures
+        -:   18: * ============================================================================ */
+        -:   19:
+        -:   20:/**
+        -:   21: * @brief Prepared statements cache for a connection
+        -:   22: */
+        -:   23:typedef struct {
+        -:   24:    sqlite3_stmt *stmt_session_create;
+        -:   25:    sqlite3_stmt *stmt_session_delete;
+        -:   26:    sqlite3_stmt *stmt_session_list;
+        -:   27:    sqlite3_stmt *stmt_session_exists;
+        -:   28:    sqlite3_stmt *stmt_message_append;
+        -:   29:    sqlite3_stmt *stmt_message_query;
+        -:   30:    sqlite3_stmt *stmt_message_clear;
+        -:   31:    sqlite3_stmt *stmt_memory_write;
+        -:   32:    sqlite3_stmt *stmt_memory_read;
+        -:   33:    sqlite3_stmt *stmt_memory_delete;
+        -:   34:    sqlite3_stmt *stmt_memory_search;
+        -:   35:} mimi_mem_stmt_cache_t;
+        -:   36:
+        -:   37:/**
+        -:   38: * @brief Connection pool slot
+        -:   39: */
+        -:   40:typedef struct {
+        -:   41:    sqlite3 *db;
+        -:   42:    mimi_mem_stmt_cache_t stmts;
+        -:   43:    int in_use;
+        -:   44:    int64_t last_used;
+        -:   45:} mimi_mem_conn_slot_t;
+        -:   46:
+        -:   47:/**
+        -:   48: * @brief Internal memory pool structure
+        -:   49: */
+        -:   50:struct mimi_mem_pool {
+        -:   51:    mimi_mem_config_t config;
+        -:   52:    mimi_mem_conn_slot_t *connections;
+        -:   53:    int pool_size;
+        -:   54:    char last_error[512];
+        -:   55:};
+        -:   56:
+        -:   57:/* ============================================================================
+        -:   58: * Internal Helper Functions
+        -:   59: * ============================================================================ */
+        -:   60:
+     6865:   61:static int64_t get_timestamp_ms(void)
+        -:   62:{
+        -:   63:    struct timespec ts;
+     6865:   64:    clock_gettime(CLOCK_REALTIME, &ts);
+     6867:   65:    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        -:   66:}
+        -:   67:
+       22:   68:static int init_statements(sqlite3 *db, mimi_mem_stmt_cache_t *stmts)
+        -:   69:{
+        -:   70:    int ret;
+        -:   71:    
+        -:   72:    /* Session statements */
+       22:   73:    ret = sqlite3_prepare_v2(db, 
+        -:   74:        "INSERT OR IGNORE INTO sessions (session_id) VALUES (?)",
+        -:   75:        -1, &stmts->stmt_session_create, NULL);
+      22*:   76:    if (ret != SQLITE_OK) return -1;
+        -:   77:    
+       22:   78:    ret = sqlite3_prepare_v2(db,
+        -:   79:        "DELETE FROM sessions WHERE session_id = ?",
+        -:   80:        -1, &stmts->stmt_session_delete, NULL);
+      22*:   81:    if (ret != SQLITE_OK) return -1;
+        -:   82:    
+       22:   83:    ret = sqlite3_prepare_v2(db,
+        -:   84:        "SELECT session_id FROM sessions ORDER BY created_at DESC",
+        -:   85:        -1, &stmts->stmt_session_list, NULL);
+      22*:   86:    if (ret != SQLITE_OK) return -1;
+        -:   87:    
+       22:   88:    ret = sqlite3_prepare_v2(db,
+        -:   89:        "SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1",
+        -:   90:        -1, &stmts->stmt_session_exists, NULL);
+      22*:   91:    if (ret != SQLITE_OK) return -1;
+        -:   92:    
+        -:   93:    /* Message statements */
+       22:   94:    ret = sqlite3_prepare_v2(db,
+        -:   95:        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+        -:   96:        -1, &stmts->stmt_message_append, NULL);
+      22*:   97:    if (ret != SQLITE_OK) return -1;
+        -:   98:    
+       22:   99:    ret = sqlite3_prepare_v2(db,
+        -:  100:        "SELECT msg_id, session_id, role, content, timestamp FROM messages "
+        -:  101:        "WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?",
+        -:  102:        -1, &stmts->stmt_message_query, NULL);
+      22*:  103:    if (ret != SQLITE_OK) return -1;
+        -:  104:    
+       22:  105:    ret = sqlite3_prepare_v2(db,
+        -:  106:        "DELETE FROM messages WHERE session_id = ?",
+        -:  107:        -1, &stmts->stmt_message_clear, NULL);
+      22*:  108:    if (ret != SQLITE_OK) return -1;
+        -:  109:    
+        -:  110:    /* Memory statements */
+       22:  111:    ret = sqlite3_prepare_v2(db,
+        -:  112:        "INSERT INTO memory (key, value, created_at, updated_at) "
+        -:  113:        "VALUES (?, ?, strftime('%s', 'now') * 1000, strftime('%s', 'now') * 1000) "
+        -:  114:        "ON CONFLICT(key) DO UPDATE SET "
+        -:  115:        "value = excluded.value, updated_at = strftime('%s', 'now') * 1000",
+        -:  116:        -1, &stmts->stmt_memory_write, NULL);
+      22*:  117:    if (ret != SQLITE_OK) return -1;
+        -:  118:    
+       22:  119:    ret = sqlite3_prepare_v2(db,
+        -:  120:        "SELECT value FROM memory WHERE key = ?",
+        -:  121:        -1, &stmts->stmt_memory_read, NULL);
+      22*:  122:    if (ret != SQLITE_OK) return -1;
+        -:  123:    
+       22:  124:    ret = sqlite3_prepare_v2(db,
+        -:  125:        "DELETE FROM memory WHERE key = ?",
+        -:  126:        -1, &stmts->stmt_memory_delete, NULL);
+      22*:  127:    if (ret != SQLITE_OK) return -1;
+        -:  128:    
+       22:  129:    ret = sqlite3_prepare_v2(db,
+        -:  130:        "SELECT key, value, created_at, updated_at FROM memory "
+        -:  131:        "WHERE key LIKE ? OR value LIKE ? ORDER BY updated_at DESC",
+        -:  132:        -1, &stmts->stmt_memory_search, NULL);
+      22*:  133:    if (ret != SQLITE_OK) return -1;
+        -:  134:    
+       22:  135:    return 0;
+        -:  136:}
+        -:  137:
+       22:  138:static void finalize_statements(mimi_mem_stmt_cache_t *stmts)
+        -:  139:{
+      22*:  140:    if (stmts == NULL) return;
+        -:  141:    
+       22:  142:    if (stmts->stmt_session_create) sqlite3_finalize(stmts->stmt_session_create);
+       22:  143:    if (stmts->stmt_session_delete) sqlite3_finalize(stmts->stmt_session_delete);
+       22:  144:    if (stmts->stmt_session_list) sqlite3_finalize(stmts->stmt_session_list);
+       22:  145:    if (stmts->stmt_session_exists) sqlite3_finalize(stmts->stmt_session_exists);
+       22:  146:    if (stmts->stmt_message_append) sqlite3_finalize(stmts->stmt_message_append);
+       22:  147:    if (stmts->stmt_message_query) sqlite3_finalize(stmts->stmt_message_query);
+       22:  148:    if (stmts->stmt_message_clear) sqlite3_finalize(stmts->stmt_message_clear);
+       22:  149:    if (stmts->stmt_memory_write) sqlite3_finalize(stmts->stmt_memory_write);
+       22:  150:    if (stmts->stmt_memory_read) sqlite3_finalize(stmts->stmt_memory_read);
+       22:  151:    if (stmts->stmt_memory_delete) sqlite3_finalize(stmts->stmt_memory_delete);
+       22:  152:    if (stmts->stmt_memory_search) sqlite3_finalize(stmts->stmt_memory_search);
+        -:  153:}
+        -:  154:
+       22:  155:static int init_database(sqlite3 *db)
+        -:  156:{
+       22:  157:    char *err_msg = NULL;
+        -:  158:    int ret;
+        -:  159:    
+        -:  160:    /* SQLite 性能优化 */
+        -:  161:    
+        -:  162:    /* 1. WAL 模式 - 提升并发写入性能 */
+       22:  163:    ret = sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, &err_msg);
+       22:  164:    if (ret != SQLITE_OK) {
+    #####:  165:        sqlite3_free(err_msg);
+    #####:  166:        return -1;
+        -:  167:    }
+        -:  168:    
+        -:  169:    /* 2. 同步模式优化 - NORMAL 平衡性能与安全 */
+       22:  170:    sqlite3_exec(db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
+        -:  171:    
+        -:  172:    /* 3. 缓存大小 - 2000 页 (约 8MB) */
+       22:  173:    sqlite3_exec(db, "PRAGMA cache_size=-2000", NULL, NULL, NULL);
+        -:  174:    
+        -:  175:    /* 4. 临时存储内存中 */
+       22:  176:    sqlite3_exec(db, "PRAGMA temp_store=MEMORY", NULL, NULL, NULL);
+        -:  177:    
+        -:  178:    /* 5. 批量写入时关闭自动提交 (由事务控制) */
+       22:  179:    sqlite3_exec(db, "PRAGMA locking_mode=EXCLUSIVE", NULL, NULL, NULL);
+        -:  180:    
+        -:  181:    /* Create sessions table */
+       22:  182:    const char *sql_sessions = 
+        -:  183:        "CREATE TABLE IF NOT EXISTS sessions ("
+        -:  184:        "  session_id TEXT PRIMARY KEY,"
+        -:  185:        "  created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)"
+        -:  186:        ")";
+        -:  187:    
+       22:  188:    ret = sqlite3_exec(db, sql_sessions, NULL, NULL, &err_msg);
+       22:  189:    if (ret != SQLITE_OK) {
+    #####:  190:        sqlite3_free(err_msg);
+    #####:  191:        return -1;
+        -:  192:    }
+        -:  193:    
+        -:  194:    /* Create messages table */
+       22:  195:    const char *sql_messages =
+        -:  196:        "CREATE TABLE IF NOT EXISTS messages ("
+        -:  197:        "  msg_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        -:  198:        "  session_id TEXT NOT NULL,"
+        -:  199:        "  role TEXT NOT NULL,"
+        -:  200:        "  content TEXT NOT NULL,"
+        -:  201:        "  timestamp INTEGER DEFAULT (strftime('%s', 'now') * 1000),"
+        -:  202:        "  FOREIGN KEY (session_id) REFERENCES sessions(session_id)"
+        -:  203:        ")";
+        -:  204:    
+       22:  205:    ret = sqlite3_exec(db, sql_messages, NULL, NULL, &err_msg);
+       22:  206:    if (ret != SQLITE_OK) {
+    #####:  207:        sqlite3_free(err_msg);
+    #####:  208:        return -1;
+        -:  209:    }
+        -:  210:    
+        -:  211:    /* Create messages index */
+       22:  212:    const char *sql_index =
+        -:  213:        "CREATE INDEX IF NOT EXISTS idx_messages_session "
+        -:  214:        "ON messages(session_id, timestamp)";
+        -:  215:    
+       22:  216:    ret = sqlite3_exec(db, sql_index, NULL, NULL, &err_msg);
+       22:  217:    if (ret != SQLITE_OK) {
+    #####:  218:        sqlite3_free(err_msg);
+    #####:  219:        return -1;
+        -:  220:    }
+        -:  221:    
+        -:  222:    /* Create memory table */
+       22:  223:    const char *sql_memory =
+        -:  224:        "CREATE TABLE IF NOT EXISTS memory ("
+        -:  225:        "  key TEXT PRIMARY KEY,"
+        -:  226:        "  value TEXT NOT NULL,"
+        -:  227:        "  created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),"
+        -:  228:        "  updated_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)"
+        -:  229:        ")";
+        -:  230:    
+       22:  231:    ret = sqlite3_exec(db, sql_memory, NULL, NULL, &err_msg);
+       22:  232:    if (ret != SQLITE_OK) {
+    #####:  233:        sqlite3_free(err_msg);
+    #####:  234:        return -1;
+        -:  235:    }
+        -:  236:    
+       22:  237:    return 0;
+        -:  238:}
+        -:  239:
+     3423:  240:static mimi_mem_conn_slot_t* get_connection(mimi_mem_pool_t *pool)
+        -:  241:{
+     3423:  242:    if (pool == NULL) {
+    #####:  243:        return NULL;
+        -:  244:    }
+        -:  245:    
+     3423:  246:    int64_t now = get_timestamp_ms();
+        -:  247:    
+        -:  248:    /* Find an available connection */
+     7869:  249:    for (int i = 0; i < pool->pool_size; i++) {
+     7869:  250:        if (!pool->connections[i].in_use) {
+     3423:  251:            pool->connections[i].in_use = 1;
+     3423:  252:            pool->connections[i].last_used = now;
+     3423:  253:            return &pool->connections[i];
+        -:  254:        }
+        -:  255:    }
+        -:  256:    
+    #####:  257:    return NULL; /* Pool exhausted */
+        -:  258:}
+        -:  259:
+     3423:  260:static void release_connection(mimi_mem_conn_slot_t *slot)
+        -:  261:{
+     3423:  262:    if (slot != NULL) {
+     3423:  263:        slot->in_use = 0;
+     3423:  264:        slot->last_used = get_timestamp_ms();
+        -:  265:    }
+     3423:  266:}
+        -:  267:
+    #####:  268:static void set_error(mimi_mem_pool_t *pool, const char *msg)
+        -:  269:{
+    #####:  270:    if (pool != NULL && msg != NULL) {
+    #####:  271:        strncpy(pool->last_error, msg, sizeof(pool->last_error) - 1);
+    #####:  272:        pool->last_error[sizeof(pool->last_error) - 1] = '\0';
+        -:  273:    }
+    #####:  274:}
+        -:  275:
+        -:  276:/* ============================================================================
+        -:  277: * Lifecycle Management
+        -:  278: * ============================================================================ */
+        -:  279:
+        4:  280:mimi_mem_pool_t* mimi_mem_pool_create(const mimi_mem_config_t *config)
+        -:  281:{
+        4:  282:    if (config == NULL) {
+    #####:  283:        return NULL;
+        -:  284:    }
+        -:  285:    
+        4:  286:    if (config->pool_size < 1 || config->pool_size > 16) {
+    #####:  287:        return NULL;
+        -:  288:    }
+        -:  289:    
+        4:  290:    mimi_mem_pool_t *pool = (mimi_mem_pool_t*)calloc(1, sizeof(mimi_mem_pool_t));
+        4:  291:    if (pool == NULL) {
+    #####:  292:        return NULL;
+        -:  293:    }
+        -:  294:    
+        4:  295:    memcpy(&pool->config, config, sizeof(mimi_mem_config_t));
+        4:  296:    pool->pool_size = config->pool_size;
+        -:  297:    
+        -:  298:    /* Allocate connection slots */
+        4:  299:    pool->connections = (mimi_mem_conn_slot_t*)calloc(pool->pool_size, sizeof(mimi_mem_conn_slot_t));
+        4:  300:    if (pool->connections == NULL) {
+    #####:  301:        free(pool);
+    #####:  302:        return NULL;
+        -:  303:    }
+        -:  304:    
+        -:  305:    /* Initialize connections */
+       26:  306:    for (int i = 0; i < pool->pool_size; i++) {
+       22:  307:        int ret = sqlite3_open(config->db_path, &pool->connections[i].db);
+       22:  308:        if (ret != SQLITE_OK) {
+    #####:  309:            set_error(pool, sqlite3_errmsg(pool->connections[i].db));
+    #####:  310:            sqlite3_close(pool->connections[i].db);
+        -:  311:            /* Cleanup already opened connections */
+    #####:  312:            for (int j = 0; j < i; j++) {
+    #####:  313:                finalize_statements(&pool->connections[j].stmts);
+    #####:  314:                sqlite3_close(pool->connections[j].db);
+        -:  315:            }
+    #####:  316:            free(pool->connections);
+    #####:  317:            free(pool);
+    #####:  318:            return NULL;
+        -:  319:        }
+        -:  320:        
+        -:  321:        /* Apply SQLite optimizations to each connection */
+       22:  322:        if (init_database(pool->connections[i].db) != 0) {
+    #####:  323:            set_error(pool, "Failed to initialize database");
+    #####:  324:            for (int j = 0; j <= i; j++) {
+    #####:  325:                finalize_statements(&pool->connections[j].stmts);
+    #####:  326:                sqlite3_close(pool->connections[j].db);
+        -:  327:            }
+    #####:  328:            free(pool->connections);
+    #####:  329:            free(pool);
+    #####:  330:            return NULL;
+        -:  331:        }
+        -:  332:        
+        -:  333:        /* Prepare statements for this connection */
+       22:  334:        if (init_statements(pool->connections[i].db, &pool->connections[i].stmts) != 0) {
+    #####:  335:            set_error(pool, "Failed to prepare statements");
+    #####:  336:            for (int j = 0; j <= i; j++) {
+    #####:  337:                finalize_statements(&pool->connections[j].stmts);
+    #####:  338:                sqlite3_close(pool->connections[j].db);
+        -:  339:            }
+    #####:  340:            free(pool->connections);
+    #####:  341:            free(pool);
+    #####:  342:            return NULL;
+        -:  343:        }
+        -:  344:        
+       22:  345:        pool->connections[i].in_use = 0;
+       22:  346:        pool->connections[i].last_used = get_timestamp_ms();
+        -:  347:    }
+        -:  348:    
+        4:  349:    return pool;
+        -:  350:}
+        -:  351:
+        4:  352:void mimi_mem_pool_destroy(mimi_mem_pool_t *pool)
+        -:  353:{
+        4:  354:    if (pool == NULL) {
+    #####:  355:        return;
+        -:  356:    }
+        -:  357:    
+       26:  358:    for (int i = 0; i < pool->pool_size; i++) {
+       22:  359:        if (pool->connections[i].db != NULL) {
+        -:  360:            /* Finalize prepared statements */
+       22:  361:            finalize_statements(&pool->connections[i].stmts);
+       22:  362:            sqlite3_close(pool->connections[i].db);
+        -:  363:        }
+        -:  364:    }
+        -:  365:    
+        4:  366:    free(pool->connections);
+        4:  367:    free(pool);
+        -:  368:}
+        -:  369:
+        -:  370:/* ============================================================================
+        -:  371: * Session Management
+        -:  372: * ============================================================================ */
+        -:  373:
+      112:  374:int mimi_mem_session_create(mimi_mem_pool_t *pool, const char *session_id)
+        -:  375:{
+      112:  376:    if (pool == NULL || session_id == NULL) {
+    #####:  377:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  378:    }
+        -:  379:    
+      112:  380:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+      112:  381:    if (slot == NULL) {
+    #####:  382:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  383:    }
+        -:  384:    
+        -:  385:    sqlite3_stmt *stmt;
+      112:  386:    const char *sql = "INSERT OR IGNORE INTO sessions (session_id) VALUES (?)";
+        -:  387:    
+      112:  388:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+      112:  389:    if (ret != SQLITE_OK) {
+    #####:  390:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  391:        release_connection(slot);
+    #####:  392:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  393:    }
+        -:  394:    
+      112:  395:    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+      112:  396:    ret = sqlite3_step(stmt);
+      112:  397:    sqlite3_finalize(stmt);
+      112:  398:    release_connection(slot);
+        -:  399:    
+      112:  400:    if (ret == SQLITE_DONE) {
+      112:  401:        return MIMI_MEMORY_OK;
+    #####:  402:    } else if (ret == SQLITE_CONSTRAINT) {
+    #####:  403:        return MIMI_MEMORY_ERR_EXISTS;
+        -:  404:    } else {
+    #####:  405:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  406:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  407:    }
+        -:  408:}
+        -:  409:
+    #####:  410:int mimi_mem_session_delete(mimi_mem_pool_t *pool, const char *session_id)
+        -:  411:{
+    #####:  412:    if (pool == NULL || session_id == NULL) {
+    #####:  413:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  414:    }
+        -:  415:    
+    #####:  416:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+    #####:  417:    if (slot == NULL) {
+    #####:  418:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  419:    }
+        -:  420:    
+        -:  421:    sqlite3_stmt *stmt;
+    #####:  422:    const char *sql = "DELETE FROM sessions WHERE session_id = ?";
+        -:  423:    
+    #####:  424:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+    #####:  425:    if (ret != SQLITE_OK) {
+    #####:  426:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  427:        release_connection(slot);
+    #####:  428:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  429:    }
+        -:  430:    
+    #####:  431:    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+    #####:  432:    sqlite3_step(stmt);
+    #####:  433:    int changes = sqlite3_changes(slot->db);
+    #####:  434:    sqlite3_finalize(stmt);
+    #####:  435:    release_connection(slot);
+        -:  436:    
+    #####:  437:    return (changes > 0) ? MIMI_MEMORY_OK : MIMI_MEMORY_ERR_NOT_FOUND;
+        -:  438:}
+        -:  439:
+    #####:  440:int mimi_mem_session_list(mimi_mem_pool_t *pool, char ***sessions, int *count)
+        -:  441:{
+    #####:  442:    if (pool == NULL || sessions == NULL || count == NULL) {
+    #####:  443:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  444:    }
+        -:  445:    
+    #####:  446:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+    #####:  447:    if (slot == NULL) {
+    #####:  448:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  449:    }
+        -:  450:    
+        -:  451:    sqlite3_stmt *stmt;
+    #####:  452:    const char *sql = "SELECT session_id FROM sessions ORDER BY created_at DESC";
+        -:  453:    
+    #####:  454:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+    #####:  455:    if (ret != SQLITE_OK) {
+    #####:  456:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  457:        release_connection(slot);
+    #####:  458:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  459:    }
+        -:  460:    
+        -:  461:    /* Count results */
+    #####:  462:    int session_count = 0;
+    #####:  463:    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    #####:  464:        session_count++;
+        -:  465:    }
+        -:  466:    
+    #####:  467:    sqlite3_finalize(stmt);
+        -:  468:    
+    #####:  469:    if (session_count == 0) {
+    #####:  470:        *sessions = NULL;
+    #####:  471:        *count = 0;
+    #####:  472:        release_connection(slot);
+    #####:  473:        return MIMI_MEMORY_OK;
+        -:  474:    }
+        -:  475:    
+        -:  476:    /* Re-prepare for fetching */
+    #####:  477:    ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+    #####:  478:    if (ret != SQLITE_OK) {
+    #####:  479:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  480:        release_connection(slot);
+    #####:  481:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  482:    }
+        -:  483:    
+        -:  484:    /* Allocate array */
+    #####:  485:    *sessions = (char**)malloc(session_count * sizeof(char*));
+    #####:  486:    if (*sessions == NULL) {
+    #####:  487:        sqlite3_finalize(stmt);
+    #####:  488:        release_connection(slot);
+    #####:  489:        return MIMI_MEMORY_ERR_NO_MEMORY;
+        -:  490:    }
+        -:  491:    
+        -:  492:    /* Fetch results */
+    #####:  493:    for (int i = 0; i < session_count; i++) {
+    #####:  494:        if (sqlite3_step(stmt) == SQLITE_ROW) {
+    #####:  495:            const char *text = (const char*)sqlite3_column_text(stmt, 0);
+    #####:  496:            (*sessions)[i] = strdup(text ? text : "");
+    #####:  497:            if ((*sessions)[i] == NULL) {
+        -:  498:                /* Cleanup on failure */
+    #####:  499:                for (int j = 0; j < i; j++) {
+    #####:  500:                    free((*sessions)[j]);
+        -:  501:                }
+    #####:  502:                free(*sessions);
+    #####:  503:                *sessions = NULL;
+    #####:  504:                sqlite3_finalize(stmt);
+    #####:  505:                release_connection(slot);
+    #####:  506:                return MIMI_MEMORY_ERR_NO_MEMORY;
+        -:  507:            }
+        -:  508:        }
+        -:  509:    }
+        -:  510:    
+    #####:  511:    sqlite3_finalize(stmt);
+    #####:  512:    *count = session_count;
+    #####:  513:    release_connection(slot);
+    #####:  514:    return MIMI_MEMORY_OK;
+        -:  515:}
+        -:  516:
+    #####:  517:int mimi_mem_session_exists(mimi_mem_pool_t *pool, const char *session_id)
+        -:  518:{
+    #####:  519:    if (pool == NULL || session_id == NULL) {
+    #####:  520:        return -1;
+        -:  521:    }
+        -:  522:    
+    #####:  523:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+    #####:  524:    if (slot == NULL) {
+    #####:  525:        return -1;
+        -:  526:    }
+        -:  527:    
+        -:  528:    sqlite3_stmt *stmt;
+    #####:  529:    const char *sql = "SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1";
+        -:  530:    
+    #####:  531:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+    #####:  532:    if (ret != SQLITE_OK) {
+    #####:  533:        release_connection(slot);
+    #####:  534:        return -1;
+        -:  535:    }
+        -:  536:    
+    #####:  537:    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+    #####:  538:    ret = sqlite3_step(stmt);
+    #####:  539:    sqlite3_finalize(stmt);
+    #####:  540:    release_connection(slot);
+        -:  541:    
+    #####:  542:    return (ret == SQLITE_ROW) ? 1 : 0;
+        -:  543:}
+        -:  544:
+        -:  545:/* ============================================================================
+        -:  546: * Message Storage
+        -:  547: * ============================================================================ */
+        -:  548:
+     2201:  549:int mimi_mem_message_append(mimi_mem_pool_t *pool, const char *session_id,
+        -:  550:                            const char *role, const char *content, int64_t *msg_id)
+        -:  551:{
+     2201:  552:    if (pool == NULL || session_id == NULL || role == NULL || content == NULL) {
+    #####:  553:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  554:    }
+        -:  555:    
+     2201:  556:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+     2201:  557:    if (slot == NULL) {
+    #####:  558:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  559:    }
+        -:  560:    
+        -:  561:    sqlite3_stmt *stmt;
+     2201:  562:    const char *sql = "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)";
+        -:  563:    
+     2201:  564:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+     2201:  565:    if (ret != SQLITE_OK) {
+    #####:  566:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  567:        release_connection(slot);
+    #####:  568:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  569:    }
+        -:  570:    
+     2201:  571:    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+     2200:  572:    sqlite3_bind_text(stmt, 2, role, -1, SQLITE_STATIC);
+     2201:  573:    sqlite3_bind_text(stmt, 3, content, -1, SQLITE_STATIC);
+        -:  574:    
+     2201:  575:    ret = sqlite3_step(stmt);
+        -:  576:    
+     2199:  577:    if (ret == SQLITE_DONE && msg_id != NULL) {
+    #####:  578:        *msg_id = sqlite3_last_insert_rowid(slot->db);
+        -:  579:    }
+        -:  580:    
+     2199:  581:    sqlite3_finalize(stmt);
+     2178:  582:    release_connection(slot);
+        -:  583:    
+    2201*:  584:    return (ret == SQLITE_DONE) ? MIMI_MEMORY_OK : MIMI_MEMORY_ERR_DB_ERROR;
+        -:  585:}
+        -:  586:
+      110:  587:int mimi_mem_message_query(mimi_mem_pool_t *pool, const char *session_id,
+        -:  588:                           int limit, mimi_mem_message_t ***messages, int *count)
+        -:  589:{
+      110:  590:    if (pool == NULL || session_id == NULL || messages == NULL || count == NULL) {
+    #####:  591:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  592:    }
+        -:  593:    
+      110:  594:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+      110:  595:    if (slot == NULL) {
+    #####:  596:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  597:    }
+        -:  598:    
+        -:  599:    sqlite3_stmt *stmt;
+      110:  600:    const char *sql = (limit > 0) ?
+        -:  601:        "SELECT msg_id, session_id, role, content, timestamp FROM messages "
+     110*:  602:        "WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?" :
+        -:  603:        "SELECT msg_id, session_id, role, content, timestamp FROM messages "
+        -:  604:        "WHERE session_id = ? ORDER BY timestamp ASC";
+        -:  605:    
+      110:  606:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+      110:  607:    if (ret != SQLITE_OK) {
+    #####:  608:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  609:        release_connection(slot);
+    #####:  610:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  611:    }
+        -:  612:    
+      110:  613:    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+      110:  614:    if (limit > 0) {
+      110:  615:        sqlite3_bind_int(stmt, 2, limit);
+        -:  616:    }
+        -:  617:    
+        -:  618:    /* Count results */
+      110:  619:    int msg_count = 0;
+     1469:  620:    while (sqlite3_step(stmt) == SQLITE_ROW) {
+     1359:  621:        msg_count++;
+        -:  622:    }
+        -:  623:    
+      109:  624:    sqlite3_finalize(stmt);
+        -:  625:    
+      110:  626:    if (msg_count == 0) {
+        1:  627:        *messages = NULL;
+        1:  628:        *count = 0;
+        1:  629:        release_connection(slot);
+        1:  630:        return MIMI_MEMORY_OK;
+        -:  631:    }
+        -:  632:    
+        -:  633:    /* Re-prepare for fetching */
+      109:  634:    ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+      109:  635:    if (ret != SQLITE_OK) {
+    #####:  636:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  637:        release_connection(slot);
+    #####:  638:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  639:    }
+        -:  640:    
+      109:  641:    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+      109:  642:    if (limit > 0) {
+      109:  643:        sqlite3_bind_int(stmt, 2, limit);
+        -:  644:    }
+        -:  645:    
+        -:  646:    /* Allocate array */
+      109:  647:    *messages = (mimi_mem_message_t**)malloc(msg_count * sizeof(mimi_mem_message_t*));
+      109:  648:    if (*messages == NULL) {
+    #####:  649:        sqlite3_finalize(stmt);
+    #####:  650:        release_connection(slot);
+    #####:  651:        return MIMI_MEMORY_ERR_NO_MEMORY;
+        -:  652:    }
+        -:  653:    
+        -:  654:    /* Fetch results */
+     1469:  655:    for (int i = 0; i < msg_count; i++) {
+     1360:  656:        if (sqlite3_step(stmt) == SQLITE_ROW) {
+     1360:  657:            mimi_mem_message_t *msg = (mimi_mem_message_t*)calloc(1, sizeof(mimi_mem_message_t));
+     1360:  658:            if (msg == NULL) {
+        -:  659:                /* Cleanup on failure */
+    #####:  660:                for (int j = 0; j < i; j++) {
+    #####:  661:                    mimi_mem_message_free((*messages)[j]);
+        -:  662:                }
+    #####:  663:                free(*messages);
+    #####:  664:                sqlite3_finalize(stmt);
+    #####:  665:                release_connection(slot);
+    #####:  666:                return MIMI_MEMORY_ERR_NO_MEMORY;
+        -:  667:            }
+        -:  668:            
+     1360:  669:            msg->msg_id = sqlite3_column_int64(stmt, 0);
+        -:  670:            
+        -:  671:            const char *text;
+     1360:  672:            text = (const char*)sqlite3_column_text(stmt, 1);
+    1360*:  673:            msg->session_id = strdup(text ? text : "");
+        -:  674:            
+     1360:  675:            text = (const char*)sqlite3_column_text(stmt, 2);
+    1360*:  676:            msg->role = strdup(text ? text : "");
+        -:  677:            
+     1360:  678:            text = (const char*)sqlite3_column_text(stmt, 3);
+    1360*:  679:            msg->content = strdup(text ? text : "");
+        -:  680:            
+     1360:  681:            msg->timestamp = sqlite3_column_int64(stmt, 4);
+        -:  682:            
+     1360:  683:            (*messages)[i] = msg;
+        -:  684:        }
+        -:  685:    }
+        -:  686:    
+      109:  687:    sqlite3_finalize(stmt);
+      109:  688:    *count = msg_count;
+      109:  689:    release_connection(slot);
+      109:  690:    return MIMI_MEMORY_OK;
+        -:  691:}
+        -:  692:
+     1354:  693:void mimi_mem_message_free(mimi_mem_message_t *msg)
+        -:  694:{
+     1354:  695:    if (msg == NULL) {
+    #####:  696:        return;
+        -:  697:    }
+        -:  698:    
+     1354:  699:    free(msg->session_id);
+     1354:  700:    free(msg->role);
+     1354:  701:    free(msg->content);
+     1354:  702:    free(msg);
+        -:  703:}
+        -:  704:
+    #####:  705:int mimi_mem_message_clear(mimi_mem_pool_t *pool, const char *session_id)
+        -:  706:{
+    #####:  707:    if (pool == NULL || session_id == NULL) {
+    #####:  708:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  709:    }
+        -:  710:    
+    #####:  711:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+    #####:  712:    if (slot == NULL) {
+    #####:  713:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  714:    }
+        -:  715:    
+        -:  716:    sqlite3_stmt *stmt;
+    #####:  717:    const char *sql = "DELETE FROM messages WHERE session_id = ?";
+        -:  718:    
+    #####:  719:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+    #####:  720:    if (ret != SQLITE_OK) {
+    #####:  721:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  722:        release_connection(slot);
+    #####:  723:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  724:    }
+        -:  725:    
+    #####:  726:    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+    #####:  727:    sqlite3_step(stmt);
+    #####:  728:    sqlite3_finalize(stmt);
+    #####:  729:    release_connection(slot);
+        -:  730:    
+    #####:  731:    return MIMI_MEMORY_OK;
+        -:  732:}
+        -:  733:
+        -:  734:/**
+        -:  735: * @brief 批量插入消息 (事务优化)
+        -:  736: * 
+        -:  737: * 使用事务批量写入多条消息，显著提升性能
+        -:  738: */
+    #####:  739:int mimi_mem_message_batch_append(mimi_mem_pool_t *pool, const char *session_id,
+        -:  740:                                  const char **roles, const char **contents, int count)
+        -:  741:{
+    #####:  742:    if (pool == NULL || session_id == NULL || roles == NULL || contents == NULL || count <= 0) {
+    #####:  743:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  744:    }
+        -:  745:    
+    #####:  746:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+    #####:  747:    if (slot == NULL) {
+    #####:  748:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  749:    }
+        -:  750:    
+    #####:  751:    sqlite3 *db = slot->db;
+        -:  752:    int ret;
+        -:  753:    
+        -:  754:    /* 开始事务 */
+    #####:  755:    ret = sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+    #####:  756:    if (ret != SQLITE_OK) {
+    #####:  757:        set_error(pool, sqlite3_errmsg(db));
+    #####:  758:        release_connection(slot);
+    #####:  759:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  760:    }
+        -:  761:    
+        -:  762:    /* 批量插入 */
+    #####:  763:    int success_count = 0;
+    #####:  764:    for (int i = 0; i < count; i++) {
+    #####:  765:        sqlite3_stmt *stmt = slot->stmts.stmt_message_append;
+    #####:  766:        sqlite3_reset(stmt);
+        -:  767:        
+    #####:  768:        sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+    #####:  769:        sqlite3_bind_text(stmt, 2, roles[i], -1, SQLITE_STATIC);
+    #####:  770:        sqlite3_bind_text(stmt, 3, contents[i], -1, SQLITE_STATIC);
+        -:  771:        
+    #####:  772:        ret = sqlite3_step(stmt);
+    #####:  773:        if (ret == SQLITE_DONE) {
+    #####:  774:            success_count++;
+        -:  775:        } else {
+    #####:  776:            break;
+        -:  777:        }
+        -:  778:    }
+        -:  779:    
+        -:  780:    /* 提交或回滚 */
+    #####:  781:    if (success_count == count) {
+    #####:  782:        ret = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    #####:  783:        release_connection(slot);
+    #####:  784:        return (ret == SQLITE_OK) ? MIMI_MEMORY_OK : MIMI_MEMORY_ERR_DB_ERROR;
+        -:  785:    } else {
+    #####:  786:        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    #####:  787:        set_error(pool, "Batch insert failed");
+    #####:  788:        release_connection(slot);
+    #####:  789:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  790:    }
+        -:  791:}
+        -:  792:
+        -:  793:/* ============================================================================
+        -:  794: * Memory Operations
+        -:  795: * ============================================================================ */
+        -:  796:
+     1000:  797:int mimi_mem_write(mimi_mem_pool_t *pool, const char *key, const char *value)
+        -:  798:{
+     1000:  799:    if (pool == NULL || key == NULL || value == NULL) {
+    #####:  800:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  801:    }
+        -:  802:    
+     1000:  803:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+     1000:  804:    if (slot == NULL) {
+    #####:  805:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  806:    }
+        -:  807:    
+        -:  808:    sqlite3_stmt *stmt;
+     1000:  809:    const char *sql = 
+        -:  810:        "INSERT INTO memory (key, value, created_at, updated_at) "
+        -:  811:        "VALUES (?, ?, strftime('%s', 'now') * 1000, strftime('%s', 'now') * 1000) "
+        -:  812:        "ON CONFLICT(key) DO UPDATE SET "
+        -:  813:        "value = excluded.value, updated_at = strftime('%s', 'now') * 1000";
+        -:  814:    
+     1000:  815:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+     1000:  816:    if (ret != SQLITE_OK) {
+    #####:  817:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  818:        release_connection(slot);
+    #####:  819:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  820:    }
+        -:  821:    
+     1000:  822:    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+     1000:  823:    sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
+        -:  824:    
+     1000:  825:    ret = sqlite3_step(stmt);
+     1000:  826:    sqlite3_finalize(stmt);
+     1000:  827:    release_connection(slot);
+        -:  828:    
+    1000*:  829:    return (ret == SQLITE_DONE) ? MIMI_MEMORY_OK : MIMI_MEMORY_ERR_DB_ERROR;
+        -:  830:}
+        -:  831:
+    #####:  832:int mimi_mem_read(mimi_mem_pool_t *pool, const char *key, char **value)
+        -:  833:{
+    #####:  834:    if (pool == NULL || key == NULL || value == NULL) {
+    #####:  835:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  836:    }
+        -:  837:    
+    #####:  838:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+    #####:  839:    if (slot == NULL) {
+    #####:  840:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  841:    }
+        -:  842:    
+        -:  843:    sqlite3_stmt *stmt;
+    #####:  844:    const char *sql = "SELECT value FROM memory WHERE key = ?";
+        -:  845:    
+    #####:  846:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+    #####:  847:    if (ret != SQLITE_OK) {
+    #####:  848:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  849:        release_connection(slot);
+    #####:  850:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  851:    }
+        -:  852:    
+    #####:  853:    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+    #####:  854:    ret = sqlite3_step(stmt);
+        -:  855:    
+    #####:  856:    if (ret == SQLITE_ROW) {
+    #####:  857:        const char *text = (const char*)sqlite3_column_text(stmt, 0);
+    #####:  858:        *value = strdup(text ? text : "");
+    #####:  859:        sqlite3_finalize(stmt);
+    #####:  860:        release_connection(slot);
+    #####:  861:        return (*value != NULL) ? MIMI_MEMORY_OK : MIMI_MEMORY_ERR_NO_MEMORY;
+        -:  862:    } else {
+    #####:  863:        sqlite3_finalize(stmt);
+    #####:  864:        release_connection(slot);
+    #####:  865:        return MIMI_MEMORY_ERR_NOT_FOUND;
+        -:  866:    }
+        -:  867:}
+        -:  868:
+    #####:  869:int mimi_mem_delete(mimi_mem_pool_t *pool, const char *key)
+        -:  870:{
+    #####:  871:    if (pool == NULL || key == NULL) {
+    #####:  872:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  873:    }
+        -:  874:    
+    #####:  875:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+    #####:  876:    if (slot == NULL) {
+    #####:  877:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  878:    }
+        -:  879:    
+        -:  880:    sqlite3_stmt *stmt;
+    #####:  881:    const char *sql = "DELETE FROM memory WHERE key = ?";
+        -:  882:    
+    #####:  883:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+    #####:  884:    if (ret != SQLITE_OK) {
+    #####:  885:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  886:        release_connection(slot);
+    #####:  887:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  888:    }
+        -:  889:    
+    #####:  890:    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+    #####:  891:    sqlite3_step(stmt);
+    #####:  892:    int changes = sqlite3_changes(slot->db);
+    #####:  893:    sqlite3_finalize(stmt);
+    #####:  894:    release_connection(slot);
+        -:  895:    
+    #####:  896:    return (changes > 0) ? MIMI_MEMORY_OK : MIMI_MEMORY_ERR_NOT_FOUND;
+        -:  897:}
+        -:  898:
+    #####:  899:int mimi_mem_search(mimi_mem_pool_t *pool, const char *query,
+        -:  900:                    mimi_mem_entry_t ***results, int *count)
+        -:  901:{
+    #####:  902:    if (pool == NULL || query == NULL || results == NULL || count == NULL) {
+    #####:  903:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -:  904:    }
+        -:  905:    
+    #####:  906:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+    #####:  907:    if (slot == NULL) {
+    #####:  908:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -:  909:    }
+        -:  910:    
+        -:  911:    sqlite3_stmt *stmt;
+    #####:  912:    const char *sql = 
+        -:  913:        "SELECT key, value, created_at, updated_at FROM memory "
+        -:  914:        "WHERE key LIKE ? OR value LIKE ? ORDER BY updated_at DESC";
+        -:  915:    
+    #####:  916:    int ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+    #####:  917:    if (ret != SQLITE_OK) {
+    #####:  918:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  919:        release_connection(slot);
+    #####:  920:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  921:    }
+        -:  922:    
+        -:  923:    char pattern[512];
+    #####:  924:    snprintf(pattern, sizeof(pattern), "%%%s%%", query);
+    #####:  925:    sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_STATIC);
+    #####:  926:    sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC);
+        -:  927:    
+        -:  928:    /* Count results */
+    #####:  929:    int entry_count = 0;
+    #####:  930:    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    #####:  931:        entry_count++;
+        -:  932:    }
+        -:  933:    
+    #####:  934:    sqlite3_finalize(stmt);
+        -:  935:    
+    #####:  936:    if (entry_count == 0) {
+    #####:  937:        *results = NULL;
+    #####:  938:        *count = 0;
+    #####:  939:        release_connection(slot);
+    #####:  940:        return MIMI_MEMORY_OK;
+        -:  941:    }
+        -:  942:    
+        -:  943:    /* Re-prepare for fetching */
+    #####:  944:    ret = sqlite3_prepare_v2(slot->db, sql, -1, &stmt, NULL);
+    #####:  945:    if (ret != SQLITE_OK) {
+    #####:  946:        set_error(pool, sqlite3_errmsg(slot->db));
+    #####:  947:        release_connection(slot);
+    #####:  948:        return MIMI_MEMORY_ERR_DB_ERROR;
+        -:  949:    }
+        -:  950:    
+    #####:  951:    sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_STATIC);
+    #####:  952:    sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_STATIC);
+        -:  953:    
+        -:  954:    /* Allocate array */
+    #####:  955:    *results = (mimi_mem_entry_t**)malloc(entry_count * sizeof(mimi_mem_entry_t*));
+    #####:  956:    if (*results == NULL) {
+    #####:  957:        sqlite3_finalize(stmt);
+    #####:  958:        release_connection(slot);
+    #####:  959:        return MIMI_MEMORY_ERR_NO_MEMORY;
+        -:  960:    }
+        -:  961:    
+        -:  962:    /* Fetch results */
+    #####:  963:    for (int i = 0; i < entry_count; i++) {
+    #####:  964:        if (sqlite3_step(stmt) == SQLITE_ROW) {
+    #####:  965:            mimi_mem_entry_t *entry = (mimi_mem_entry_t*)calloc(1, sizeof(mimi_mem_entry_t));
+    #####:  966:            if (entry == NULL) {
+        -:  967:                /* Cleanup on failure */
+    #####:  968:                for (int j = 0; j < i; j++) {
+    #####:  969:                    mimi_mem_entry_free((*results)[j]);
+        -:  970:                }
+    #####:  971:                free(*results);
+    #####:  972:                sqlite3_finalize(stmt);
+    #####:  973:                release_connection(slot);
+    #####:  974:                return MIMI_MEMORY_ERR_NO_MEMORY;
+        -:  975:            }
+        -:  976:            
+        -:  977:            const char *text;
+    #####:  978:            text = (const char*)sqlite3_column_text(stmt, 0);
+    #####:  979:            entry->key = strdup(text ? text : "");
+        -:  980:            
+    #####:  981:            text = (const char*)sqlite3_column_text(stmt, 1);
+    #####:  982:            entry->value = strdup(text ? text : "");
+        -:  983:            
+    #####:  984:            entry->created_at = sqlite3_column_int64(stmt, 2);
+    #####:  985:            entry->updated_at = sqlite3_column_int64(stmt, 3);
+        -:  986:            
+    #####:  987:            (*results)[i] = entry;
+        -:  988:        }
+        -:  989:    }
+        -:  990:    
+    #####:  991:    sqlite3_finalize(stmt);
+    #####:  992:    *count = entry_count;
+    #####:  993:    release_connection(slot);
+    #####:  994:    return MIMI_MEMORY_OK;
+        -:  995:}
+        -:  996:
+    #####:  997:void mimi_mem_entry_free(mimi_mem_entry_t *entry)
+        -:  998:{
+    #####:  999:    if (entry == NULL) {
+    #####: 1000:        return;
+        -: 1001:    }
+        -: 1002:    
+    #####: 1003:    free(entry->key);
+    #####: 1004:    free(entry->value);
+    #####: 1005:    free(entry);
+        -: 1006:}
+        -: 1007:
+        -: 1008:/* ============================================================================
+        -: 1009: * Utility Functions
+        -: 1010: * ============================================================================ */
+        -: 1011:
+    #####: 1012:const char* mimi_mem_version(void)
+        -: 1013:{
+    #####: 1014:    return MIMI_MEMORY_VERSION;
+        -: 1015:}
+        -: 1016:
+    #####: 1017:const char* mimi_mem_strerror(int error)
+        -: 1018:{
+    #####: 1019:    switch (error) {
+    #####: 1020:        case MIMI_MEMORY_OK:
+    #####: 1021:            return "Success";
+    #####: 1022:        case MIMI_MEMORY_ERR_INVALID_ARG:
+    #####: 1023:            return "Invalid argument";
+    #####: 1024:        case MIMI_MEMORY_ERR_NO_MEMORY:
+    #####: 1025:            return "Memory allocation failed";
+    #####: 1026:        case MIMI_MEMORY_ERR_DB_ERROR:
+    #####: 1027:            return "Database error";
+    #####: 1028:        case MIMI_MEMORY_ERR_NOT_FOUND:
+    #####: 1029:            return "Resource not found";
+    #####: 1030:        case MIMI_MEMORY_ERR_EXISTS:
+    #####: 1031:            return "Resource already exists";
+    #####: 1032:        case MIMI_MEMORY_ERR_POOL_FULL:
+    #####: 1033:            return "Connection pool is full";
+    #####: 1034:        case MIMI_MEMORY_ERR_INIT_FAILED:
+    #####: 1035:            return "Initialization failed";
+    #####: 1036:        default:
+    #####: 1037:            return "Unknown error";
+        -: 1038:    }
+        -: 1039:}
+        -: 1040:
+    #####: 1041:const char* mimi_mem_last_error(mimi_mem_pool_t *pool)
+        -: 1042:{
+    #####: 1043:    if (pool == NULL) {
+    #####: 1044:        return "Invalid pool";
+        -: 1045:    }
+    #####: 1046:    return pool->last_error;
+        -: 1047:}
+        -: 1048:
+    #####: 1049:int mimi_mem_vacuum(mimi_mem_pool_t *pool)
+        -: 1050:{
+    #####: 1051:    if (pool == NULL) {
+    #####: 1052:        return MIMI_MEMORY_ERR_INVALID_ARG;
+        -: 1053:    }
+        -: 1054:    
+    #####: 1055:    mimi_mem_conn_slot_t *slot = get_connection(pool);
+    #####: 1056:    if (slot == NULL) {
+    #####: 1057:        return MIMI_MEMORY_ERR_POOL_FULL;
+        -: 1058:    }
+        -: 1059:    
+    #####: 1060:    int ret = sqlite3_exec(slot->db, "VACUUM", NULL, NULL, NULL);
+    #####: 1061:    release_connection(slot);
+        -: 1062:    
+    #####: 1063:    return (ret == SQLITE_OK) ? MIMI_MEMORY_OK : MIMI_MEMORY_ERR_DB_ERROR;
+        -: 1064:}

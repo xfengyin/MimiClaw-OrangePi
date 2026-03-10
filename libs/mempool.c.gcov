@@ -1,0 +1,246 @@
+        -:    0:Source:libmimi-core/src/mempool.c
+        -:    1:/**
+        -:    2: * @file mempool.c
+        -:    3: * @brief MimiClaw Memory Pool Implementation
+        -:    4: * @version 2.0.0
+        -:    5: * 
+        -:    6: * @brief 固定大小内存块池，减少 malloc/free 调用，降低内存碎片
+        -:    7: */
+        -:    8:
+        -:    9:#define _GNU_SOURCE
+        -:   10:
+        -:   11:#include "mempool.h"
+        -:   12:#include <stdlib.h>
+        -:   13:#include <string.h>
+        -:   14:#include <stdio.h>
+        -:   15:
+        -:   16:/* ============================================================================
+        -:   17: * 内部结构
+        -:   18: * ============================================================================ */
+        -:   19:
+        -:   20:/**
+        -:   21: * @brief 内存块元数据
+        -:   22: * 
+        -:   23: * 每个块前面有一个小头部，记录是否在使用中
+        -:   24: */
+        -:   25:typedef struct {
+        -:   26:    int in_use;           /**< 是否在使用中 */
+        -:   27:    uint32_t magic;       /**< 魔数，用于调试 */
+        -:   28:} mempool_block_header_t;
+        -:   29:
+        -:   30:#define MEMPOOL_BLOCK_MAGIC 0xDEADBEEF
+        -:   31:
+        -:   32:/**
+        -:   33: * @brief 内存池内部结构
+        -:   34: */
+        -:   35:struct mimi_mempool {
+        -:   36:    mimi_mempool_config_t config;
+        -:   37:    void *memory;                  /**< 连续内存区域 */
+        -:   38:    mempool_block_header_t *headers; /**< 块头部数组 */
+        -:   39:    size_t *free_list;             /**< 空闲块索引列表 */
+        -:   40:    size_t free_count;             /**< 当前空闲块数量 */
+        -:   41:    size_t total_size;             /**< 总内存占用 (包括元数据) */
+        -:   42:};
+        -:   43:
+        -:   44:/* ============================================================================
+        -:   45: * 辅助函数
+        -:   46: * ============================================================================ */
+        -:   47:
+  2000256:   48:static inline void* get_block_ptr(mimi_mempool_t *pool, size_t index)
+        -:   49:{
+        -:   50:    /* 内存布局：[header][block_data][header][block_data]... */
+  2000256:   51:    size_t header_size = sizeof(mempool_block_header_t);
+  2000256:   52:    size_t block_offset = index * (header_size + pool->config.block_size);
+  2000256:   53:    return (char*)pool->memory + block_offset + header_size;
+        -:   54:}
+        -:   55:
+  1000000:   56:static inline size_t get_block_index(mimi_mempool_t *pool, void *ptr)
+        -:   57:{
+  1000000:   58:    size_t header_size = sizeof(mempool_block_header_t);
+  1000000:   59:    size_t stride = header_size + pool->config.block_size;
+  1000000:   60:    size_t offset = (char*)ptr - (char*)pool->memory;
+  1000000:   61:    return (offset - header_size) / stride;
+        -:   62:}
+        -:   63:
+        -:   64:/* ============================================================================
+        -:   65: * 生命周期管理
+        -:   66: * ============================================================================ */
+        -:   67:
+        1:   68:mimi_mempool_t* mempool_create(const mimi_mempool_config_t *config)
+        -:   69:{
+        1:   70:    if (config == NULL || config->block_size == 0 || config->block_count == 0) {
+    #####:   71:        return NULL;
+        -:   72:    }
+        -:   73:
+        1:   74:    mimi_mempool_t *pool = (mimi_mempool_t*)calloc(1, sizeof(mimi_mempool_t));
+        1:   75:    if (pool == NULL) {
+    #####:   76:        return NULL;
+        -:   77:    }
+        -:   78:
+        1:   79:    pool->config = *config;
+        -:   80:    
+        1:   81:    size_t header_size = sizeof(mempool_block_header_t);
+        1:   82:    size_t block_stride = header_size + config->block_size;
+        -:   83:    
+        -:   84:    /* 分配连续内存：头部数组 + 数据块 */
+        1:   85:    pool->headers = (mempool_block_header_t*)calloc(config->block_count, sizeof(mempool_block_header_t));
+        1:   86:    if (pool->headers == NULL) {
+    #####:   87:        free(pool);
+    #####:   88:        return NULL;
+        -:   89:    }
+        -:   90:
+        1:   91:    pool->memory = malloc(config->block_count * block_stride);
+        1:   92:    if (pool->memory == NULL) {
+    #####:   93:        free(pool->headers);
+    #####:   94:        free(pool);
+    #####:   95:        return NULL;
+        -:   96:    }
+        -:   97:
+        -:   98:    /* 初始化空闲列表 */
+        1:   99:    pool->free_list = (size_t*)malloc(config->block_count * sizeof(size_t));
+        1:  100:    if (pool->free_list == NULL) {
+    #####:  101:        free(pool->memory);
+    #####:  102:        free(pool->headers);
+    #####:  103:        free(pool);
+    #####:  104:        return NULL;
+        -:  105:    }
+        -:  106:
+        -:  107:    /* 初始化所有块为空闲 */
+      257:  108:    for (size_t i = 0; i < config->block_count; i++) {
+      256:  109:        pool->headers[i].in_use = 0;
+      256:  110:        pool->headers[i].magic = MEMPOOL_BLOCK_MAGIC;
+      256:  111:        pool->free_list[i] = i;
+        -:  112:        
+        -:  113:        /* 清零数据区 (如果配置要求) */
+      256:  114:        if (config->zero_init) {
+      256:  115:            void *block_ptr = get_block_ptr(pool, i);
+      256:  116:            memset(block_ptr, 0, config->block_size);
+        -:  117:        }
+        -:  118:    }
+        -:  119:
+        1:  120:    pool->free_count = config->block_count;
+        1:  121:    pool->total_size = sizeof(mimi_mempool_t) + 
+        1:  122:                       config->block_count * sizeof(mempool_block_header_t) +
+        1:  123:                       config->block_count * sizeof(size_t) +
+        1:  124:                       config->block_count * block_stride;
+        -:  125:
+        1:  126:    return pool;
+        -:  127:}
+        -:  128:
+        1:  129:void mempool_destroy(mimi_mempool_t *pool)
+        -:  130:{
+        1:  131:    if (pool == NULL) {
+    #####:  132:        return;
+        -:  133:    }
+        -:  134:
+        1:  135:    free(pool->free_list);
+        1:  136:    free(pool->memory);
+        1:  137:    free(pool->headers);
+        1:  138:    free(pool);
+        -:  139:}
+        -:  140:
+        -:  141:/* ============================================================================
+        -:  142: * 内存分配
+        -:  143: * ============================================================================ */
+        -:  144:
+  1000000:  145:void* mempool_alloc(mimi_mempool_t *pool)
+        -:  146:{
+  1000000:  147:    if (pool == NULL || pool->free_count == 0) {
+    #####:  148:        return NULL;
+        -:  149:    }
+        -:  150:
+        -:  151:    /* 从空闲列表获取一个块 */
+  1000000:  152:    size_t index = pool->free_list[pool->free_count - 1];
+  1000000:  153:    pool->free_count--;
+        -:  154:
+        -:  155:    /* 标记为使用中 */
+  1000000:  156:    pool->headers[index].in_use = 1;
+        -:  157:
+        -:  158:    /* 清零 (如果配置要求) */
+  1000000:  159:    if (pool->config.zero_init) {
+  1000000:  160:        void *block_ptr = get_block_ptr(pool, index);
+  1000000:  161:        memset(block_ptr, 0, pool->config.block_size);
+        -:  162:    }
+        -:  163:
+  1000000:  164:    return get_block_ptr(pool, index);
+        -:  165:}
+        -:  166:
+  1000000:  167:void mempool_free(mimi_mempool_t *pool, void *ptr)
+        -:  168:{
+  1000000:  169:    if (pool == NULL || ptr == NULL) {
+    #####:  170:        return;
+        -:  171:    }
+        -:  172:
+        -:  173:    /* 验证指针是否属于此池 */
+  1000000:  174:    size_t index = get_block_index(pool, ptr);
+  1000000:  175:    if (index >= pool->config.block_count) {
+    #####:  176:        return; /* 无效指针 */
+        -:  177:    }
+        -:  178:
+        -:  179:    /* 验证魔数 */
+  1000000:  180:    if (pool->headers[index].magic != MEMPOOL_BLOCK_MAGIC) {
+    #####:  181:        return; /* 内存损坏 */
+        -:  182:    }
+        -:  183:
+        -:  184:    /* 如果已经释放，忽略 */
+  1000000:  185:    if (!pool->headers[index].in_use) {
+    #####:  186:        return;
+        -:  187:    }
+        -:  188:
+        -:  189:    /* 标记为空闲 */
+  1000000:  190:    pool->headers[index].in_use = 0;
+        -:  191:
+        -:  192:    /* 添加到空闲列表 */
+  1000000:  193:    pool->free_list[pool->free_count] = index;
+  1000000:  194:    pool->free_count++;
+        -:  195:}
+        -:  196:
+        -:  197:/* ============================================================================
+        -:  198: * 统计信息
+        -:  199: * ============================================================================ */
+        -:  200:
+    #####:  201:void mempool_stats(mimi_mempool_t *pool,
+        -:  202:                   size_t *total_blocks,
+        -:  203:                   size_t *used_blocks,
+        -:  204:                   size_t *free_blocks)
+        -:  205:{
+    #####:  206:    if (pool == NULL) {
+    #####:  207:        if (total_blocks) *total_blocks = 0;
+    #####:  208:        if (used_blocks) *used_blocks = 0;
+    #####:  209:        if (free_blocks) *free_blocks = 0;
+    #####:  210:        return;
+        -:  211:    }
+        -:  212:
+    #####:  213:    if (total_blocks) *total_blocks = pool->config.block_count;
+    #####:  214:    if (used_blocks) *used_blocks = pool->config.block_count - pool->free_count;
+    #####:  215:    if (free_blocks) *free_blocks = pool->free_count;
+        -:  216:}
+        -:  217:
+        1:  218:size_t mempool_memory_usage(mimi_mempool_t *pool)
+        -:  219:{
+        1:  220:    if (pool == NULL) {
+    #####:  221:        return 0;
+        -:  222:    }
+        1:  223:    return pool->total_size;
+        -:  224:}
+        -:  225:
+    #####:  226:int mempool_reset(mimi_mempool_t *pool)
+        -:  227:{
+    #####:  228:    if (pool == NULL) {
+    #####:  229:        return -1;
+        -:  230:    }
+        -:  231:
+        -:  232:    /* 重置所有块为空闲 */
+    #####:  233:    for (size_t i = 0; i < pool->config.block_count; i++) {
+    #####:  234:        pool->headers[i].in_use = 0;
+    #####:  235:        pool->free_list[i] = i;
+        -:  236:        
+    #####:  237:        if (pool->config.zero_init) {
+    #####:  238:            void *block_ptr = get_block_ptr(pool, i);
+    #####:  239:            memset(block_ptr, 0, pool->config.block_size);
+        -:  240:        }
+        -:  241:    }
+        -:  242:
+    #####:  243:    pool->free_count = pool->config.block_count;
+    #####:  244:    return 0;
+        -:  245:}

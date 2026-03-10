@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MimiClaw v2.0 - API 文档</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .header { background: rgba(255,255,255,0.95); padding: 40px; text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header h1 { color: #667eea; font-size: 2.5em; margin-bottom: 10px; }
+        .header p { color: #666; font-size: 1.2em; }
+        .version { display: inline-block; background: #667eea; color: white; padding: 5px 15px; border-radius: 20px; margin-top: 15px; font-size: 0.9em; }
+        .container { max-width: 1400px; margin: 30px auto; padding: 0 20px; }
+        .nav-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 25px; margin-top: 30px; }
+        .nav-card { background: white; border-radius: 12px; padding: 30px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); transition: transform 0.3s, box-shadow 0.3s; cursor: pointer; }
+        .nav-card:hover { transform: translateY(-5px); box-shadow: 0 8px 25px rgba(0,0,0,0.15); }
+        .nav-card h2 { color: #667eea; margin-bottom: 15px; font-size: 1.5em; display: flex; align-items: center; gap: 10px; }
+        .nav-card p { color: #666; margin-bottom: 20px; }
+        .nav-card .icon { font-size: 2em; }
+        .nav-card ul { list-style: none; }
+        .nav-card ul li { padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
+        .nav-card ul li:last-child { border-bottom: none; }
+        .nav-card ul li a { color: #333; text-decoration: none; transition: color 0.2s; }
+        .nav-card ul li a:hover { color: #667eea; }
+        .api-section { background: white; border-radius: 12px; padding: 30px; margin-top: 30px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .api-section h2 { color: #667eea; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #667eea; }
+        .function { background: #f8f9fa; border-left: 4px solid #667eea; padding: 20px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+        .function h3 { color: #333; font-family: 'Courier New', monospace; margin-bottom: 10px; }
+        .function .type { color: #667eea; font-weight: bold; }
+        .function .name { color: #e74c3c; font-weight: bold; }
+        .function .params { color: #27ae60; }
+        .function p { color: #666; margin-top: 10px; }
+        .function .example { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 8px; margin-top: 10px; font-family: 'Courier New', monospace; font-size: 0.9em; overflow-x: auto; }
+        .footer { text-align: center; padding: 40px; color: rgba(255,255,255,0.8); margin-top: 50px; }
+        .badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 0.8em; margin-left: 10px; }
+        .badge-core { background: #3498db; color: white; }
+        .badge-memory { background: #9b59b6; color: white; }
+        .badge-config { background: #f39c12; color: white; }
+        .badge-tools { background: #1abc9c; color: white; }
+        code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: 'Courier New', monospace; color: #e74c3c; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚀 MimiClaw API 文档</h1>
+        <p>AI Agent Framework for Embedded Systems</p>
+        <span class="version">v2.0.0</span>
+    </div>
+
+    <div class="container">
+        <div class="nav-grid">
+            <!-- libmimi-core -->
+            <div class="nav-card">
+                <h2><span class="icon">🧠</span> libmimi-core <span class="badge badge-core">核心库</span></h2>
+                <p>核心功能模块 - 会话管理、消息处理、数据库操作</p>
+                <ul>
+                    <li><a href="#core-init"><code>mimi_core_init()</code> - 初始化核心库</a></li>
+                    <li><a href="#core-session"><code>mimi_session_create()</code> - 创建会话</a></li>
+                    <li><a href="#core-message"><code>mimi_message_send()</code> - 发送消息</a></li>
+                    <li><a href="#core-cleanup"><code>mimi_core_cleanup()</code> - 清理资源</a></li>
+                </ul>
+            </div>
+
+            <!-- libmimi-memory -->
+            <div class="nav-card">
+                <h2><span class="icon">💾</span> libmimi-memory <span class="badge badge-memory">内存管理</span></h2>
+                <p>内存池管理 - 高效内存分配、连接池、缓存策略</p>
+                <ul>
+                    <li><a href="#mem-pool"><code>mimi_mempool_create()</code> - 创建内存池</a></li>
+                    <li><a href="#mem-alloc"><code>mimi_mempool_alloc()</code> - 分配内存</a></li>
+                    <li><a href="#mem-free"><code>mimi_mempool_free()</code> - 释放内存</a></li>
+                    <li><a href="#mem-stats"><code>mimi_mempool_stats()</code> - 获取统计</a></li>
+                </ul>
+            </div>
+
+            <!-- libmimi-config -->
+            <div class="nav-card">
+                <h2><span class="icon">⚙️</span> libmimi-config <span class="badge badge-config">配置管理</span></h2>
+                <p>配置系统 - 热重载、多格式支持、验证</p>
+                <ul>
+                    <li><a href="#cfg-load"><code>mimi_config_load()</code> - 加载配置</a></li>
+                    <li><a href="#cfg-get"><code>mimi_config_get()</code> - 获取配置项</a></li>
+                    <li><a href="#cfg-set"><code>mimi_config_set()</code> - 设置配置项</a></li>
+                    <li><a href="#cfg-reload"><code>mimi_config_reload()</code> - 热重载</a></li>
+                </ul>
+            </div>
+
+            <!-- libmimi-tools -->
+            <div class="nav-card">
+                <h2><span class="icon">🔧</span> libmimi-tools <span class="badge badge-tools">工具库</span></h2>
+                <p>工具函数 - 日志、异步 I/O、性能分析</p>
+                <ul>
+                    <li><a href="#tool-log"><code>mimi_log_init()</code> - 初始化日志</a></li>
+                    <li><a href="#tool-async"><code>mimi_async_run()</code> - 异步执行</a></li>
+                    <li><a href="#tool-profile"><code>mimi_profile_start()</code> - 性能分析</a></li>
+                    <li><a href="#tool-util"><code>mimi_utils_*</code> - 工具函数集</a></li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- API 详细文档 -->
+        <div class="api-section" id="core">
+            <h2>📚 libmimi-core API 详解</h2>
+            
+            <div class="function" id="core-init">
+                <h3><span class="type">int</span> <span class="name">mimi_core_init</span>(<span class="params">const char* config_path</span>)</h3>
+                <p>初始化 MimiClaw 核心库，加载配置文件并初始化数据库连接。</p>
+                <p><strong>参数:</strong> <code>config_path</code> - 配置文件路径 (JSON/YAML)</p>
+                <p><strong>返回:</strong> 0 表示成功，非 0 表示错误码</p>
+                <div class="example">// 初始化核心库
+int ret = mimi_core_init("./config/mimiclaw.json");
+if (ret != 0) {
+    fprintf(stderr, "初始化失败：%d\n", ret);
+}</div>
+            </div>
+
+            <div class="function" id="core-session">
+                <h3><span class="type">session_t*</span> <span class="name">mimi_session_create</span>(<span class="params">const char* user_id, const char* agent_id</span>)</h3>
+                <p>创建新的会话，返回会话句柄。</p>
+                <p><strong>参数:</strong> <code>user_id</code> - 用户 ID, <code>agent_id</code> - Agent ID</p>
+                <p><strong>返回:</strong> 会话句柄，失败返回 NULL</p>
+                <div class="example">// 创建会话
+session_t* sess = mimi_session_create("user_001", "dev-planner");
+if (sess) {
+    printf("会话创建成功：%p\n", (void*)sess);
+}</div>
+            </div>
+
+            <div class="function" id="core-message">
+                <h3><span class="type">int</span> <span class="name">mimi_message_send</span>(<span class="params">session_t* sess, const char* content, message_type_t type</span>)</h3>
+                <p>向会话发送消息。</p>
+                <p><strong>参数:</strong> <code>sess</code> - 会话句柄, <code>content</code> - 消息内容, <code>type</code> - 消息类型</p>
+                <p><strong>返回:</strong> 消息 ID，失败返回 -1</p>
+                <div class="example">// 发送消息
+int msg_id = mimi_message_send(sess, "你好，请帮我规划项目", MSG_TYPE_USER);
+printf("消息 ID: %d\n", msg_id);</div>
+            </div>
+
+            <div class="function" id="core-cleanup">
+                <h3><span class="type">void</span> <span class="name">mimi_core_cleanup</span>(<span class="params">void</span>)</h3>
+                <p>清理核心库资源，关闭数据库连接，释放内存。</p>
+                <div class="example">// 程序退出前清理
+mimi_core_cleanup();</div>
+            </div>
+        </div>
+
+        <div class="api-section" id="memory">
+            <h2>📚 libmimi-memory API 详解</h2>
+            
+            <div class="function" id="mem-pool">
+                <h3><span class="type">mempool_t*</span> <span class="name">mimi_mempool_create</span>(<span class="params">size_t block_size, size_t block_count</span>)</h3>
+                <p>创建内存池，预分配指定数量和大小的内存块。</p>
+                <p><strong>参数:</strong> <code>block_size</code> - 每块大小 (字节), <code>block_count</code> - 块数量</p>
+                <p><strong>返回:</strong> 内存池句柄，失败返回 NULL</p>
+                <div class="example">// 创建 4KB x 256 块的内存池
+mempool_t* pool = mimi_mempool_create(4096, 256);
+if (pool) {
+    printf("内存池创建成功\n");
+}</div>
+            </div>
+
+            <div class="function" id="mem-alloc">
+                <h3><span class="type">void*</span> <span class="name">mimi_mempool_alloc</span>(<span class="params">mempool_t* pool, size_t size</span>)</h3>
+                <p>从内存池分配内存。</p>
+                <p><strong>参数:</strong> <code>pool</code> - 内存池句柄, <code>size</code> - 请求大小</p>
+                <p><strong>返回:</strong> 分配的内存指针，失败返回 NULL</p>
+                <div class="example">// 从内存池分配
+void* buf = mimi_mempool_alloc(pool, 1024);
+if (buf) {
+    memset(buf, 0, 1024);
+}</div>
+            </div>
+
+            <div class="function" id="mem-free">
+                <h3><span class="type">void</span> <span class="name">mimi_mempool_free</span>(<span class="params">mempool_t* pool, void* ptr</span>)</h3>
+                <p>释放内存回内存池。</p>
+                <p><strong>参数:</strong> <code>pool</code> - 内存池句柄, <code>ptr</code> - 要释放的指针</p>
+                <div class="example">// 释放内存
+mimi_mempool_free(pool, buf);</div>
+            </div>
+
+            <div class="function" id="mem-stats">
+                <h3><span class="type">int</span> <span class="name">mimi_mempool_stats</span>(<span class="params">mempool_t* pool, mempool_stats_t* stats</span>)</h3>
+                <p>获取内存池统计信息。</p>
+                <p><strong>参数:</strong> <code>pool</code> - 内存池句柄, <code>stats</code> - 统计结构体指针</p>
+                <p><strong>返回:</strong> 0 表示成功</p>
+                <div class="example">// 获取统计
+mempool_stats_t stats;
+mimi_mempool_stats(pool, &stats);
+printf("已使用：%zu / %zu\n", stats.used, stats.total);</div>
+            </div>
+        </div>
+
+        <div class="api-section" id="plugins">
+            <h2>🔌 插件系统 API</h2>
+            
+            <div class="function">
+                <h3><span class="type">int</span> <span class="name">plugin_register</span>(<span class="params">const char* name, plugin_ops_t* ops</span>)</h3>
+                <p>注册插件到插件管理器。</p>
+            </div>
+
+            <div class="function">
+                <h3><span class="type">int</span> <span class="name">plugin_invoke</span>(<span class="params">const char* name, const char* action, json_t* params</span>)</h3>
+                <p>调用插件功能。</p>
+            </div>
+
+            <div class="function">
+                <h3><span class="type">void</span> <span class="name">plugin_unregister</span>(<span class="params">const char* name</span>)</h3>
+                <p>注销插件。</p>
+            </div>
+        </div>
+
+        <div class="api-section">
+            <h2>📋 插件列表</h2>
+            <table style="width:100%; border-collapse: collapse; margin-top: 15px;">
+                <thead>
+                    <tr style="background: #667eea; color: white;">
+                        <th style="padding: 12px; text-align: left;">插件名称</th>
+                        <th style="padding: 12px;">功能</th>
+                        <th style="padding: 12px;">状态</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 12px;"><code>plugin-time</code></td>
+                        <td>时间查询、时区转换</td>
+                        <td style="color: #27ae60;">✅ 已实现</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 12px;"><code>plugin-echo</code></td>
+                        <td>回声测试、调试</td>
+                        <td style="color: #27ae60;">✅ 已实现</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 12px;"><code>plugin-web-search</code></td>
+                        <td>网络搜索 (Brave API)</td>
+                        <td style="color: #27ae60;">✅ 已实现</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #ddd;">
+                        <td style="padding: 12px;"><code>plugin-file-ops</code></td>
+                        <td>文件读写操作</td>
+                        <td style="color: #27ae60;">✅ 已实现</td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 12px;"><code>plugin-memory</code></td>
+                        <td>内存管理工具</td>
+                        <td style="color: #27ae60;">✅ 已实现</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="footer">
+        <p>MimiClaw-OrangePi v2.0 | API 文档 | 生成时间：2026-03-10</p>
+        <p>基于 Doxygen 生成 | <a href="coverage-report/index.html" style="color: white;">查看覆盖率报告</a></p>
+    </div>
+</body>
+</html>

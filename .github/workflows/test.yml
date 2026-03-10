@@ -1,0 +1,335 @@
+name: MimiClaw v2.0 测试
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # ============================================================================
+  # 单元测试
+  # ============================================================================
+  unit-test:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v3
+    
+    - name: 安装依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          gcc \
+          g++ \
+          libcmocka-dev \
+          libsqlite3-dev \
+          libcurl4-openssl-dev \
+          libyaml-dev \
+          libssl-dev \
+          gcovr \
+          lcov \
+          jq
+    
+    - name: 配置 (Debug + 覆盖率)
+      run: |
+        mkdir -p build
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Debug \
+              -DCODE_COVERAGE=ON \
+              -DBUILD_TESTS=ON \
+              ..
+    
+    - name: 编译
+      run: |
+        cd build
+        make -j$(nproc)
+    
+    - name: 运行单元测试
+      run: |
+        cd build
+        ctest --output-on-failure --verbose
+    
+    - name: 生成覆盖率报告
+      run: |
+        cd build
+        lcov --capture \
+             --directory . \
+             --output-file coverage.info \
+             --gcov-tool gcov \
+             --exclude '*/tests/*' \
+             --exclude '*/third_party/*' \
+             --exclude '*/mocks/*' \
+             --exclude '*/usr/*'
+        
+        genhtml coverage.info \
+                --output-directory coverage-report \
+                --title "MimiClaw v2.0" \
+                --num-spaces 4
+    
+    - name: 上传覆盖率报告
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-report
+        path: build/coverage-report/
+    
+    - name: 验证覆盖率
+      run: |
+        cd build
+        COVERAGE=$(lcov --summary coverage.info | grep "lines..." | awk '{print $2}' | tr -d '%')
+        echo "测试覆盖率：${COVERAGE}%"
+        
+        if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+          echo "::error::覆盖率不足：${COVERAGE}% < 80%"
+          exit 1
+        fi
+        echo "✓ 覆盖率验证通过：${COVERAGE}%"
+    
+    - name: 上传测试日志
+      uses: actions/upload-artifact@v3
+      if: failure()
+      with:
+        name: test-logs
+        path: build/Testing/
+
+  # ============================================================================
+  # 性能测试
+  # ============================================================================
+  performance-test:
+    runs-on: ubuntu-22.04
+    needs: unit-test
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v3
+    
+    - name: 安装依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          gcc \
+          g++ \
+          libcmocka-dev \
+          libsqlite3-dev \
+          libcurl4-openssl-dev \
+          libyaml-dev \
+          valgrind \
+          wrk \
+          bc \
+          python3 \
+          python3-pip
+    
+    - name: 安装 Python 依赖
+      run: |
+        pip3 install websockets requests pandas matplotlib
+    
+    - name: 编译 (Release)
+      run: |
+        mkdir -p build
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTS=ON \
+              ..
+        make -j$(nproc)
+    
+    - name: 内存占用测试
+      run: |
+        cd build
+        valgrind --tool=massif \
+                 --massif-out-file=/tmp/massif.out \
+                 --pages-as-heap=yes \
+                 ./mimiclaw-agent --config=../config/test.conf &
+        AGENT_PID=$!
+        sleep 5
+        
+        # 模拟负载
+        for i in {1..100}; do
+          curl -s -X POST http://localhost:8080/api/v1/chat \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"Test $i\", \"session_id\": \"perf\"}" \
+            > /dev/null &
+        done
+        wait
+        sleep 3
+        
+        kill $AGENT_PID 2>/dev/null || true
+        wait $AGENT_PID 2>/dev/null || true
+        
+        # 分析结果
+        PEAK_MEM=$(grep -oP 'mem_heap_B=\K\d+' /tmp/massif.out | sort -n | tail -1)
+        PEAK_MEM_MB=$((PEAK_MEM / 1024 / 1024))
+        echo "峰值内存：${PEAK_MEM_MB}MB"
+        
+        if [ $PEAK_MEM_MB -lt 50 ]; then
+          echo "✓ 内存占用测试通过：${PEAK_MEM_MB}MB"
+        else
+          echo "::error::内存占用超标：${PEAK_MEM_MB}MB > 50MB"
+          exit 1
+        fi
+    
+    - name: 启动时间测试
+      run: |
+        cd build
+        START=$(date +%s%N)
+        ./mimiclaw-agent --config=../config/test.conf &
+        AGENT_PID=$!
+        
+        # 等待服务就绪
+        for i in {1..30}; do
+          if curl -s http://localhost:8080/health > /dev/null 2>&1; then
+            break
+          fi
+          sleep 0.1
+        done
+        
+        END=$(date +%s%N)
+        ELAPSED=$(( (END - START) / 1000000 ))
+        echo "启动时间：${ELAPSED}ms"
+        
+        kill $AGENT_PID 2>/dev/null || true
+        wait $AGENT_PID 2>/dev/null || true
+        
+        if [ $ELAPSED -lt 1000 ]; then
+          echo "✓ 启动时间测试通过：${ELAPSED}ms"
+        else
+          echo "::error::启动时间超标：${ELAPSED}ms > 1000ms"
+          exit 1
+        fi
+    
+    - name: 响应延迟测试
+      run: |
+        cd build
+        ./mimiclaw-agent --config=../config/test.conf &
+        AGENT_PID=$!
+        sleep 2
+        
+        # wrk 压测
+        wrk -t4 -c100 -d30s \
+            --latency \
+            --timeout=2s \
+            -s ../scripts/wrk_chat.lua \
+            http://localhost:8080/api/v1/chat > /tmp/wrk_output.txt 2>&1
+        
+        kill $AGENT_PID 2>/dev/null || true
+        wait $AGENT_PID 2>/dev/null || true
+        
+        # 解析 P95
+        P95=$(grep "95%" /tmp/wrk_output.txt | awk '{print $2}' | tr -d 'ms')
+        echo "P95 延迟：${P95}ms"
+        
+        if (( $(echo "$P95 < 200" | bc -l) )); then
+          echo "✓ 响应延迟测试通过：P95=${P95}ms"
+        else
+          echo "::error::响应延迟超标：P95=${P95}ms > 200ms"
+          exit 1
+        fi
+    
+    - name: 上传性能报告
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: performance-reports
+        path: |
+          /tmp/massif.out
+          /tmp/wrk_output.txt
+
+  # ============================================================================
+  # 集成测试
+  # ============================================================================
+  integration-test:
+    runs-on: ubuntu-22.04
+    needs: unit-test
+    
+    services:
+      # Telegram Mock 服务 (可选)
+      telegram-mock:
+        image: python:3.10-slim
+        ports:
+          - 8081:8081
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v3
+    
+    - name: 安装依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          gcc \
+          g++ \
+          libcmocka-dev \
+          libsqlite3-dev \
+          libcurl4-openssl-dev \
+          libyaml-dev \
+          python3 \
+          python3-pip
+    
+    - name: 安装 Python 依赖
+      run: |
+        pip3 install websockets requests pytest
+    
+    - name: 编译
+      run: |
+        mkdir -p build
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Debug \
+              -DBUILD_TESTS=ON \
+              -DBUILD_INTEGRATION_TESTS=ON \
+              ..
+        make -j$(nproc)
+    
+    - name: 运行集成测试
+      run: |
+        cd build
+        ./scripts/run-integration-tests.sh
+    
+    - name: 上传集成测试报告
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: integration-test-report
+        path: reports/test-report.md
+
+  # ============================================================================
+  # 生成测试报告
+  # ============================================================================
+  generate-report:
+    runs-on: ubuntu-22.04
+    needs: [unit-test, performance-test, integration-test]
+    if: always()
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v3
+    
+    - name: 下载覆盖率报告
+      uses: actions/download-artifact@v3
+      with:
+        name: coverage-report
+        path: artifacts/coverage-report
+    
+    - name: 下载性能报告
+      uses: actions/download-artifact@v3
+      with:
+        name: performance-reports
+        path: artifacts/performance-reports
+    
+    - name: 下载集成测试报告
+      uses: actions/download-artifact@v3
+      with:
+        name: integration-test-report
+        path: artifacts/integration-test-report
+    
+    - name: 生成综合测试报告
+      run: |
+        ./scripts/generate-test-report.sh
+    
+    - name: 上传综合测试报告
+      uses: actions/upload-artifact@v3
+      with:
+        name: final-test-report
+        path: reports/

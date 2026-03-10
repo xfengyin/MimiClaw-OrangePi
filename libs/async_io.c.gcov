@@ -1,0 +1,450 @@
+        -:    0:Source:libmimi-core/src/async_io.c
+        -:    1:/**
+        -:    2: * @file async_io.c
+        -:    3: * @brief MimiClaw Async I/O Implementation
+        -:    4: * @version 2.0.0
+        -:    5: * 
+        -:    6: * @brief 基于 epoll 的异步 I/O 实现 (Linux 原生)
+        -:    7: */
+        -:    8:
+        -:    9:#define _GNU_SOURCE
+        -:   10:
+        -:   11:#include "async_io.h"
+        -:   12:#include <stdlib.h>
+        -:   13:#include <string.h>
+        -:   14:#include <unistd.h>
+        -:   15:#include <errno.h>
+        -:   16:#include <sys/epoll.h>
+        -:   17:#include <sys/eventfd.h>
+        -:   18:#include <stdint.h>
+        -:   19:
+        -:   20:/* ============================================================================
+        -:   21: * 内部结构
+        -:   22: * ============================================================================ */
+        -:   23:
+        -:   24:#define MIMI_ASYNC_MAX_EVENTS 256
+        -:   25:#define MIMI_ASYNC_MAX_FDS 1024
+        -:   26:
+        -:   27:/**
+        -:   28: * @brief 任务条目
+        -:   29: */
+        -:   30:typedef struct {
+        -:   31:    int fd;
+        -:   32:    int events;
+        -:   33:    mimi_async_callback_t callback;
+        -:   34:    void *user_data;
+        -:   35:    int active;  /* 是否激活 */
+        -:   36:} mimi_async_entry_t;
+        -:   37:
+        -:   38:/**
+        -:   39: * @brief 异步上下文内部结构
+        -:   40: */
+        -:   41:struct mimi_async_ctx {
+        -:   42:    int epoll_fd;              /* epoll 文件描述符 */
+        -:   43:    int event_fd;              /* 用于停止的事件 fd */
+        -:   44:    mimi_async_entry_t *entries; /* 任务条目数组 */
+        -:   45:    size_t entry_count;        /* 当前任务数 */
+        -:   46:    size_t entry_capacity;     /* 数组容量 */
+        -:   47:    int running;               /* 是否运行中 */
+        -:   48:};
+        -:   49:
+        -:   50:/* ============================================================================
+        -:   51: * 辅助函数
+        -:   52: * ============================================================================ */
+        -:   53:
+    #####:   54:static mimi_async_entry_t* find_entry(mimi_async_ctx_t *ctx, int fd)
+        -:   55:{
+    #####:   56:    if (ctx == NULL || ctx->entries == NULL) {
+    #####:   57:        return NULL;
+        -:   58:    }
+        -:   59:    
+    #####:   60:    for (size_t i = 0; i < ctx->entry_count; i++) {
+    #####:   61:        if (ctx->entries[i].active && ctx->entries[i].fd == fd) {
+    #####:   62:            return &ctx->entries[i];
+        -:   63:        }
+        -:   64:    }
+        -:   65:    
+    #####:   66:    return NULL;
+        -:   67:}
+        -:   68:
+    #####:   69:static int ensure_capacity(mimi_async_ctx_t *ctx, size_t needed)
+        -:   70:{
+    #####:   71:    if (ctx->entry_capacity >= needed) {
+    #####:   72:        return 0;
+        -:   73:    }
+        -:   74:    
+    #####:   75:    size_t new_capacity = ctx->entry_capacity * 2;
+    #####:   76:    if (new_capacity < needed) {
+    #####:   77:        new_capacity = needed;
+        -:   78:    }
+    #####:   79:    if (new_capacity > MIMI_ASYNC_MAX_FDS) {
+    #####:   80:        return -1;
+        -:   81:    }
+        -:   82:    
+    #####:   83:    mimi_async_entry_t *new_entries = realloc(ctx->entries, 
+        -:   84:                                               new_capacity * sizeof(mimi_async_entry_t));
+    #####:   85:    if (new_entries == NULL) {
+    #####:   86:        return -1;
+        -:   87:    }
+        -:   88:    
+        -:   89:    /* 初始化新条目 */
+    #####:   90:    for (size_t i = ctx->entry_capacity; i < new_capacity; i++) {
+    #####:   91:        new_entries[i].active = 0;
+    #####:   92:        new_entries[i].fd = -1;
+        -:   93:    }
+        -:   94:    
+    #####:   95:    ctx->entries = new_entries;
+    #####:   96:    ctx->entry_capacity = new_capacity;
+    #####:   97:    return 0;
+        -:   98:}
+        -:   99:
+    #####:  100:static int events_to_epoll(int events)
+        -:  101:{
+    #####:  102:    int epoll_events = 0;
+        -:  103:    
+    #####:  104:    if (events & MIMI_ASYNC_EVENT_READ) {
+    #####:  105:        epoll_events |= EPOLLIN;
+        -:  106:    }
+    #####:  107:    if (events & MIMI_ASYNC_EVENT_WRITE) {
+    #####:  108:        epoll_events |= EPOLLOUT;
+        -:  109:    }
+    #####:  110:    if (events & (MIMI_ASYNC_EVENT_ERROR | MIMI_ASYNC_EVENT_HUP)) {
+    #####:  111:        epoll_events |= (EPOLLERR | EPOLLHUP);
+        -:  112:    }
+        -:  113:    
+    #####:  114:    return epoll_events | EPOLLET;  /* 边缘触发 */
+        -:  115:}
+        -:  116:
+        -:  117:/* ============================================================================
+        -:  118: * 生命周期管理
+        -:  119: * ============================================================================ */
+        -:  120:
+    #####:  121:mimi_async_ctx_t* mimi_async_init(void)
+        -:  122:{
+    #####:  123:    mimi_async_ctx_t *ctx = (mimi_async_ctx_t*)calloc(1, sizeof(mimi_async_ctx_t));
+    #####:  124:    if (ctx == NULL) {
+    #####:  125:        return NULL;
+        -:  126:    }
+        -:  127:    
+        -:  128:    /* 创建 epoll 实例 */
+    #####:  129:    ctx->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    #####:  130:    if (ctx->epoll_fd < 0) {
+    #####:  131:        free(ctx);
+    #####:  132:        return NULL;
+        -:  133:    }
+        -:  134:    
+        -:  135:    /* 创建事件 fd 用于停止 */
+    #####:  136:    ctx->event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    #####:  137:    if (ctx->event_fd < 0) {
+    #####:  138:        close(ctx->epoll_fd);
+    #####:  139:        free(ctx);
+    #####:  140:        return NULL;
+        -:  141:    }
+        -:  142:    
+        -:  143:    /* 注册事件 fd */
+    #####:  144:    struct epoll_event ev = {0};
+    #####:  145:    ev.events = EPOLLIN;
+    #####:  146:    ev.data.fd = ctx->event_fd;
+        -:  147:    
+    #####:  148:    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, ctx->event_fd, &ev) < 0) {
+    #####:  149:        close(ctx->event_fd);
+    #####:  150:        close(ctx->epoll_fd);
+    #####:  151:        free(ctx);
+    #####:  152:        return NULL;
+        -:  153:    }
+        -:  154:    
+        -:  155:    /* 初始化条目数组 */
+    #####:  156:    ctx->entry_capacity = 64;
+    #####:  157:    ctx->entries = (mimi_async_entry_t*)calloc(ctx->entry_capacity, sizeof(mimi_async_entry_t));
+    #####:  158:    if (ctx->entries == NULL) {
+    #####:  159:        close(ctx->event_fd);
+    #####:  160:        close(ctx->epoll_fd);
+    #####:  161:        free(ctx);
+    #####:  162:        return NULL;
+        -:  163:    }
+        -:  164:    
+    #####:  165:    ctx->running = 1;
+    #####:  166:    return ctx;
+        -:  167:}
+        -:  168:
+    #####:  169:void mimi_async_destroy(mimi_async_ctx_t *ctx)
+        -:  170:{
+    #####:  171:    if (ctx == NULL) {
+    #####:  172:        return;
+        -:  173:    }
+        -:  174:    
+        -:  175:    /* 移除所有注册的 fd */
+    #####:  176:    for (size_t i = 0; i < ctx->entry_count; i++) {
+    #####:  177:        if (ctx->entries[i].active && ctx->entries[i].fd != ctx->event_fd) {
+    #####:  178:            epoll_ctl(ctx->epoll_fd, EPOLL_CTL_DEL, ctx->entries[i].fd, NULL);
+        -:  179:        }
+        -:  180:    }
+        -:  181:    
+    #####:  182:    free(ctx->entries);
+    #####:  183:    close(ctx->event_fd);
+    #####:  184:    close(ctx->epoll_fd);
+    #####:  185:    free(ctx);
+        -:  186:}
+        -:  187:
+        -:  188:/* ============================================================================
+        -:  189: * 事件注册
+        -:  190: * ============================================================================ */
+        -:  191:
+    #####:  192:int mimi_async_add_fd(mimi_async_ctx_t *ctx, int fd, int events,
+        -:  193:                      mimi_async_callback_t callback, void *user_data)
+        -:  194:{
+    #####:  195:    if (ctx == NULL || fd < 0 || callback == NULL) {
+    #####:  196:        return -1;
+        -:  197:    }
+        -:  198:    
+        -:  199:    /* 检查是否已存在 */
+    #####:  200:    if (find_entry(ctx, fd) != NULL) {
+    #####:  201:        return -1;  /* 已存在 */
+        -:  202:    }
+        -:  203:    
+        -:  204:    /* 确保容量 */
+    #####:  205:    if (ensure_capacity(ctx, ctx->entry_count + 1) < 0) {
+    #####:  206:        return -1;
+        -:  207:    }
+        -:  208:    
+        -:  209:    /* 添加条目 */
+    #####:  210:    mimi_async_entry_t *entry = &ctx->entries[ctx->entry_count];
+    #####:  211:    entry->fd = fd;
+    #####:  212:    entry->events = events;
+    #####:  213:    entry->callback = callback;
+    #####:  214:    entry->user_data = user_data;
+    #####:  215:    entry->active = 1;
+    #####:  216:    ctx->entry_count++;
+        -:  217:    
+        -:  218:    /* 注册到 epoll */
+    #####:  219:    struct epoll_event ev = {0};
+    #####:  220:    ev.events = events_to_epoll(events);
+    #####:  221:    ev.data.fd = fd;
+        -:  222:    
+    #####:  223:    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+    #####:  224:        entry->active = 0;
+    #####:  225:        ctx->entry_count--;
+    #####:  226:        return -1;
+        -:  227:    }
+        -:  228:    
+    #####:  229:    return 0;
+        -:  230:}
+        -:  231:
+    #####:  232:int mimi_async_mod_fd(mimi_async_ctx_t *ctx, int fd, int events)
+        -:  233:{
+    #####:  234:    if (ctx == NULL || fd < 0) {
+    #####:  235:        return -1;
+        -:  236:    }
+        -:  237:    
+    #####:  238:    mimi_async_entry_t *entry = find_entry(ctx, fd);
+    #####:  239:    if (entry == NULL) {
+    #####:  240:        return -1;  /* 不存在 */
+        -:  241:    }
+        -:  242:    
+    #####:  243:    entry->events = events;
+        -:  244:    
+    #####:  245:    struct epoll_event ev = {0};
+    #####:  246:    ev.events = events_to_epoll(events);
+    #####:  247:    ev.data.fd = fd;
+        -:  248:    
+    #####:  249:    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_MOD, fd, &ev) < 0) {
+    #####:  250:        return -1;
+        -:  251:    }
+        -:  252:    
+    #####:  253:    return 0;
+        -:  254:}
+        -:  255:
+    #####:  256:int mimi_async_remove_fd(mimi_async_ctx_t *ctx, int fd)
+        -:  257:{
+    #####:  258:    if (ctx == NULL || fd < 0) {
+    #####:  259:        return -1;
+        -:  260:    }
+        -:  261:    
+    #####:  262:    mimi_async_entry_t *entry = find_entry(ctx, fd);
+    #####:  263:    if (entry == NULL) {
+    #####:  264:        return -1;  /* 不存在 */
+        -:  265:    }
+        -:  266:    
+        -:  267:    /* 从 epoll 移除 */
+    #####:  268:    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_DEL, fd, NULL) < 0) {
+    #####:  269:        return -1;
+        -:  270:    }
+        -:  271:    
+        -:  272:    /* 标记为空闲 */
+    #####:  273:    entry->active = 0;
+    #####:  274:    entry->fd = -1;
+        -:  275:    
+        -:  276:    /* 压缩数组 (可选优化) */
+        -:  277:    /* 这里简单实现，不压缩 */
+        -:  278:    
+    #####:  279:    return 0;
+        -:  280:}
+        -:  281:
+        -:  282:/* ============================================================================
+        -:  283: * 事件循环
+        -:  284: * ============================================================================ */
+        -:  285:
+    #####:  286:int mimi_async_loop(mimi_async_ctx_t *ctx, int timeout_ms)
+        -:  287:{
+    #####:  288:    if (ctx == NULL || !ctx->running) {
+    #####:  289:        return -1;
+        -:  290:    }
+        -:  291:    
+        -:  292:    struct epoll_event events[MIMI_ASYNC_MAX_EVENTS];
+    #####:  293:    int timeout = (timeout_ms < 0) ? -1 : timeout_ms;
+        -:  294:    
+    #####:  295:    while (ctx->running) {
+    #####:  296:        int n = epoll_wait(ctx->epoll_fd, events, MIMI_ASYNC_MAX_EVENTS, timeout);
+        -:  297:        
+    #####:  298:        if (n < 0) {
+    #####:  299:            if (errno == EINTR) {
+    #####:  300:                continue;  /* 被信号中断，重试 */
+        -:  301:            }
+    #####:  302:            return -1;
+        -:  303:        }
+        -:  304:        
+    #####:  305:        if (n == 0) {
+    #####:  306:            return 0;  /* 超时 */
+        -:  307:        }
+        -:  308:        
+        -:  309:        /* 处理事件 */
+    #####:  310:        for (int i = 0; i < n; i++) {
+    #####:  311:            int fd = events[i].data.fd;
+        -:  312:            
+        -:  313:            /* 检查是否是停止事件 */
+    #####:  314:            if (fd == ctx->event_fd) {
+        -:  315:                uint64_t val;
+    #####:  316:                read(fd, &val, sizeof(val));  /* 清除事件 */
+    #####:  317:                if (val > 0) {
+    #####:  318:                    ctx->running = 0;
+        -:  319:                }
+    #####:  320:                continue;
+        -:  321:            }
+        -:  322:            
+        -:  323:            /* 查找回调 */
+    #####:  324:            mimi_async_entry_t *entry = find_entry(ctx, fd);
+    #####:  325:            if (entry == NULL || !entry->active) {
+    #####:  326:                continue;
+        -:  327:            }
+        -:  328:            
+        -:  329:            /* 转换事件 */
+    #####:  330:            int async_events = 0;
+    #####:  331:            if (events[i].events & (EPOLLIN | EPOLLRDHUP)) {
+    #####:  332:                async_events |= MIMI_ASYNC_EVENT_READ;
+        -:  333:            }
+    #####:  334:            if (events[i].events & EPOLLOUT) {
+    #####:  335:                async_events |= MIMI_ASYNC_EVENT_WRITE;
+        -:  336:            }
+    #####:  337:            if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+    #####:  338:                async_events |= (MIMI_ASYNC_EVENT_ERROR | MIMI_ASYNC_EVENT_HUP);
+        -:  339:            }
+        -:  340:            
+        -:  341:            /* 调用回调 */
+    #####:  342:            entry->callback(fd, async_events, entry->user_data);
+        -:  343:        }
+        -:  344:        
+    #####:  345:        return n;  /* 返回处理的事件数 */
+        -:  346:    }
+        -:  347:    
+    #####:  348:    return 0;
+        -:  349:}
+        -:  350:
+    #####:  351:int mimi_async_run_once(mimi_async_ctx_t *ctx, int max_events, int timeout_ms)
+        -:  352:{
+    #####:  353:    if (ctx == NULL || max_events <= 0) {
+    #####:  354:        return -1;
+        -:  355:    }
+        -:  356:    
+    #####:  357:    if (max_events > MIMI_ASYNC_MAX_EVENTS) {
+    #####:  358:        max_events = MIMI_ASYNC_MAX_EVENTS;
+        -:  359:    }
+        -:  360:    
+        -:  361:    struct epoll_event events[MIMI_ASYNC_MAX_EVENTS];
+    #####:  362:    int timeout = (timeout_ms < 0) ? -1 : timeout_ms;
+        -:  363:    
+    #####:  364:    int n = epoll_wait(ctx->epoll_fd, events, max_events, timeout);
+        -:  365:    
+    #####:  366:    if (n < 0) {
+    #####:  367:        if (errno == EINTR) {
+    #####:  368:            return 0;
+        -:  369:        }
+    #####:  370:        return -1;
+        -:  371:    }
+        -:  372:    
+    #####:  373:    if (n == 0) {
+    #####:  374:        return 0;  /* 超时 */
+        -:  375:    }
+        -:  376:    
+        -:  377:    /* 处理事件 */
+    #####:  378:    int processed = 0;
+    #####:  379:    for (int i = 0; i < n && processed < max_events; i++) {
+    #####:  380:        int fd = events[i].data.fd;
+        -:  381:        
+        -:  382:        /* 检查是否是停止事件 */
+    #####:  383:        if (fd == ctx->event_fd) {
+        -:  384:            uint64_t val;
+    #####:  385:            read(fd, &val, sizeof(val));
+    #####:  386:            if (val > 0) {
+    #####:  387:                ctx->running = 0;
+        -:  388:            }
+    #####:  389:            continue;
+        -:  390:        }
+        -:  391:        
+        -:  392:        /* 查找回调 */
+    #####:  393:        mimi_async_entry_t *entry = find_entry(ctx, fd);
+    #####:  394:        if (entry == NULL || !entry->active) {
+    #####:  395:            continue;
+        -:  396:        }
+        -:  397:        
+        -:  398:        /* 转换事件 */
+    #####:  399:        int async_events = 0;
+    #####:  400:        if (events[i].events & (EPOLLIN | EPOLLRDHUP)) {
+    #####:  401:            async_events |= MIMI_ASYNC_EVENT_READ;
+        -:  402:        }
+    #####:  403:        if (events[i].events & EPOLLOUT) {
+    #####:  404:            async_events |= MIMI_ASYNC_EVENT_WRITE;
+        -:  405:        }
+    #####:  406:        if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+    #####:  407:            async_events |= (MIMI_ASYNC_EVENT_ERROR | MIMI_ASYNC_EVENT_HUP);
+        -:  408:        }
+        -:  409:        
+        -:  410:        /* 调用回调 */
+    #####:  411:        entry->callback(fd, async_events, entry->user_data);
+    #####:  412:        processed++;
+        -:  413:    }
+        -:  414:    
+    #####:  415:    return processed;
+        -:  416:}
+        -:  417:
+    #####:  418:void mimi_async_stop(mimi_async_ctx_t *ctx)
+        -:  419:{
+    #####:  420:    if (ctx == NULL) {
+    #####:  421:        return;
+        -:  422:    }
+        -:  423:    
+    #####:  424:    ctx->running = 0;
+        -:  425:    
+        -:  426:    /* 写入事件 fd 唤醒 epoll_wait */
+    #####:  427:    uint64_t val = 1;
+    #####:  428:    write(ctx->event_fd, &val, sizeof(val));
+        -:  429:}
+        -:  430:
+        -:  431:/* ============================================================================
+        -:  432: * 工具函数
+        -:  433: * ============================================================================ */
+        -:  434:
+    #####:  435:int mimi_async_get_epoll_fd(mimi_async_ctx_t *ctx)
+        -:  436:{
+    #####:  437:    if (ctx == NULL) {
+    #####:  438:        return -1;
+        -:  439:    }
+    #####:  440:    return ctx->epoll_fd;
+        -:  441:}
+        -:  442:
+    #####:  443:size_t mimi_async_task_count(mimi_async_ctx_t *ctx)
+        -:  444:{
+    #####:  445:    if (ctx == NULL) {
+    #####:  446:        return 0;
+        -:  447:    }
+    #####:  448:    return ctx->entry_count;
+        -:  449:}
