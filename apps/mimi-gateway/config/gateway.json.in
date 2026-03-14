@@ -1,0 +1,21 @@
+{
+    "server": {
+        "bind_addr": "@BIND_ADDR@",
+        "port": @PORT@
+    },
+    "core": {
+        "api_key": "${MIMI_API_KEY}",
+        "model": "@MODEL@",
+        "max_tokens": 2048,
+        "temperature": 0.7
+    },
+    "memory": {
+        "db_path": "./mimi.db",
+        "pool_size": 4,
+        "max_idle_time": 60
+    },
+    "sessions": {
+        "max_sessions": @MAX_SESSIONS@,
+        "timeout": 3600
+    }
+}

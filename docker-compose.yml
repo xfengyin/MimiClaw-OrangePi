@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  mimi-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mimiclaw-orangepi:latest
+    container_name: mimi-gateway
+    restart: unless-stopped
+    environment:
+      - MIMI_API_KEY=${MIMI_API_KEY}
+      - MIMI_MODEL=${MIMI_MODEL:-gpt-3.5-turbo}
+    ports:
+      - "8080:8080"
+      - "8081:8081"  # WebSocket
+    volumes:
+      - ./data:/home/mimi/data
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0  # Serial device (optional)
+
+  # Telegram Bot (optional)
+  mimi-telegram:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mimiclaw-orangepi:latest
+    container_name: mimi-telegram
+    restart: unless-stopped
+    environment:
+      - MIMI_API_KEY=${MIMI_API_KEY}
+      - MIMI_TELEGRAM_BOT_TOKEN=${MIMI_TELEGRAM_BOT_TOKEN}
+    depends_on:
+      - mimi-gateway
+    volumes:
+      - ./data:/home/mimi/data
+
+networks:
+  default:
+    name: mimi-network
