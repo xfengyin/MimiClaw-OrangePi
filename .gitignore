@@ -1,0 +1,53 @@
+# Build outputs
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Binary
+mimiclaw
+mimiclaw-*
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+
+# Vendor (we don't use vendor)
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+
+# Config with secrets
+.env
+config.local.yaml
+
+# Release
+releases/
+
+# Temporary
+tmp/
+temp/
+*.tmp

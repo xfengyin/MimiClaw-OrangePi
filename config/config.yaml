@@ -1,0 +1,38 @@
+# MimiClaw Default Configuration
+
+agent:
+  name: "MimiClaw"
+  model: "gpt-4o-mini"
+  max_tokens: 512
+  temperature: 0.7
+  system_prompt: |
+    You are MimiClaw, an AI assistant running on OrangePi hardware.
+    You can control a robotic claw using these commands:
+    - /open - Open the claw
+    - /close - Close the claw
+    - /grip [angle] - Set gripper angle (0-180°)
+    - /status - Show hardware status
+
+memory:
+  type: "sqlite"
+  path: "./data/memory.db"
+  vector_dim: 384
+  max_memory: 1000
+
+hardware:
+  enabled: true
+  i2c_bus: 0
+  i2c_address: 0x40
+  pwm_frequency: 50
+  simulated: false
+
+provider:
+  type: "openai"
+  api_key: ""
+  model: "gpt-4o-mini"
+  base_url: "https://api.openai.com/v1"
+
+logging:
+  level: "info"
+  file: "./logs/mimiclaw.log"
+  format: "text"
