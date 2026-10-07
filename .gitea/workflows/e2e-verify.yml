@@ -1,0 +1,22 @@
+name: E2E Verify
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 环境探针
+        run: |
+          echo "=== E2E 验证 ==="
+          echo "runner arch: $(uname -m)"
+          echo "python: $(python3 -V 2>&1)"
+          echo "hostname: $(hostname)"
+          echo "GITHUB_SHA: $GITHUB_SHA"
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 列出文件
+        run: ls -la
