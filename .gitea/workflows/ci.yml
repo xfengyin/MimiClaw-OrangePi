@@ -1,0 +1,46 @@
+name: CI
+
+# 只放 Gitea 侧：本仓库以 Gitea 为唯一源，GitHub 是只读镜像。
+# 放在 .github/ 会被 Gitea 和 GitHub 各跑一遍，故只留 .gitea/。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 串行 runner 上必须配 cancel-in-progress：
+# concurrency 用 false 时，只要有一个 run 卡住，这个组会被永久毒死。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.25'
+
+jobs:
+  build:
+    name: Build / Vet / Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build / vet / test
+        run: |
+          echo "arch: $(uname -m) / runner: $RUNNER_NAME"
+          if [ ! -f go.mod ]; then
+            echo "脚手架阶段：仓库还没有 go.mod，跳过 Go 构建。"
+            echo "代码落地后这一步会自动开始 build / vet / test。"
+            exit 0
+          fi
+          go mod download
+          go build ./...
+          go vet ./...
+          go test ./...
