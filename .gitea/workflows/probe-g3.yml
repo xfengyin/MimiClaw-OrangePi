@@ -1,0 +1,14 @@
+name: Gitea Probe 3 whole matrix
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ github.server_url == 'https://github.com' && fromJSON('{"tag":["gh_a","gh_b","gh_c"]}') || fromJSON('{"tag":["gitea_a"]}') }}
+    steps:
+      - run: echo "RAN ${{ matrix.tag }}"
