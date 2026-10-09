@@ -1,5 +1,4 @@
-name: 
-name: Probe 4 job-level if (control)
+name: Probe 4 job if control
 on:
   workflow_dispatch:
   push:
