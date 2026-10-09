@@ -1,0 +1,16 @@
+name: Gitea Probe 2 exclude
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [t_a, t_b, t_c]
+        exclude: ${{ github.server_url != 'https://github.com' && fromJSON('[{"tag":"t_b"},{"tag":"t_c"}]') || fromJSON('[]') }}
+    steps:
+      - run: echo "RAN ${{ matrix.tag }}"
