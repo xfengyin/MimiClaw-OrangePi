@@ -1,0 +1,16 @@
+name: 
+name: Probe 1 include
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ github.server_url == 'https://github.com' && fromJSON('[{"tag":"gh_a"},{"tag":"gh_b"},{"tag":"gh_c"}]') || fromJSON('[{"tag":"gitea_a"}]') }}
+    steps:
+      - run: echo "RAN ${{ matrix.tag }}"
