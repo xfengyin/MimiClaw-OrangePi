@@ -17,6 +17,11 @@ concurrency:
 
 env:
   GO_VERSION: '1.25'
+  # runner 环境只给了单个 goproxy.cn，实测两次因它 TLS 超时而整挂 job：
+  #   jciyuan-spider task 1084（16s 失败）、kongming-agent task 981。
+  # 加兜底后 go 会自动顺次尝试：aliyun ~80ms / goproxy.cn ~140ms / goproxy.io ~600ms（均实测 3/3 可用）。
+  GOPROXY: https://goproxy.cn,https://mirrors.aliyun.com/goproxy/,https://goproxy.io,direct
+  GOSUMDB: sum.golang.google.cn
 
 jobs:
   build:
